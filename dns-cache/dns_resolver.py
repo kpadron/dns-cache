@@ -34,7 +34,7 @@ class DnsResolver:
         self._responses = {}
         self._events = {}
 
-    def resolve(self, request: dp.Packet) -> dp.Packet:
+    def resolve(self, request: dp.DnsRequest) -> dp.DnsResponse:
         """Synchronously resolves a DNS request via forwarding to a upstream recursive server.
 
         Args:
@@ -45,7 +45,7 @@ class DnsResolver:
         """
         return self.loop.run_until_complete(self.aresolve(request))
 
-    async def aresolve(self, request: dp.Packet) -> dp.Packet:
+    async def aresolve(self, request: dp.DnsRequest) -> dp.DnsResponse:
         """Asynchronously resolves a DNS request via forwarding to a upstream recursive server.
 
         Args:

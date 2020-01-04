@@ -1,7 +1,12 @@
 import asyncio as aio
 import ssl
 import struct
-from typing import *
+from typing import (Any, ByteString, Iterable, MutableMapping, MutableSet,
+                    Optional, Sequence, Tuple, Union)
+
+_DnsQueries = Union[ByteString, Iterable[ByteString]]
+_DnsAnswers = Union[ByteString, Sequence[bytes]]
+_AioStream = Union[Tuple[aio.StreamReader, aio.StreamWriter], None]
 
 
 class BaseDnsTunnel:
@@ -33,7 +38,7 @@ class BaseDnsTunnel:
         """
         return self._loop.run_until_complete(self.adisconnect())
 
-    def resolve(self, query: Union[bytes, Iterable[bytes]]) -> Union[bytes, Sequence[bytes]]:
+    def resolve(self, query: _DnsQueries) -> _DnsAnswers:
         """Synchronously resolve a DNS query by forwarding to the peer.
 
         Args:
@@ -70,7 +75,7 @@ class BaseDnsTunnel:
         """
         raise NotImplementedError
 
-    async def aresolve(self, query: Union[bytes, Iterable[bytes]], timeout: Optional[float] = None) -> Union[bytes, Sequence[bytes]]:
+    async def aresolve(self, query: _DnsQueries, timeout: Optional[float] = None) -> _DnsAnswers:
         """Asynchronously resolve a DNS query by forwarding to the peer.
 
         Args:
@@ -115,7 +120,7 @@ class TcpDnsTunnel(BaseDnsTunnel):
         self._rlock = aio.Lock()
         self._wlock = aio.Lock()
 
-        self._stream: AioStream = None
+        self._stream: _AioStream = None
 
     def is_closed(self) -> bool:
         """Returns a boolean value indicating if the underlying transport is closed.
@@ -148,13 +153,13 @@ class TcpDnsTunnel(BaseDnsTunnel):
         except aio.TimeoutError:
             return False
 
-    async def aresolve(self, query: Union[bytes, Iterable[bytes]], timeout: Optional[float] = None) -> Union[bytes, Sequence[bytes]]:
+    async def aresolve(self, query: _DnsQueries, timeout: Optional[float] = None) -> _DnsAnswers:
         # Check input to determine functionality
         if isinstance(query, (ByteString, memoryview)):
             awaitable = self._aresolve(query)
             default_value = b''
         else:
-            awaitable = aio.gather(*[self._aresolve(q) for q in query])
+            awaitable = aio.gather(*(self._aresolve(q) for q in query))
             default_value = []
 
         # Forward DNS queries to the peer
@@ -192,9 +197,8 @@ class TcpDnsTunnel(BaseDnsTunnel):
             writer.close()
 
             # Wait for the full disconnection if possible
-            wait_closed: Optional[Coroutine] = getattr(writer, 'wait_closed', None)
-            if wait_closed is not None:
-                await wait_closed()
+            try: await writer.wait_closed()
+            except AttributeError: pass
 
     async def _aresolve(self, query: bytes) -> bytes:
         """Resolve a query using the peer and return an answer.
@@ -299,7 +303,7 @@ class TcpDnsTunnel(BaseDnsTunnel):
             return True
 
         # Handle connection errors
-        except Exception as exc:
+        except Exception:
             return False
 
     async def _arecv_packet(self) -> bytes:

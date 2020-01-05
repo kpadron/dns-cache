@@ -1,26 +1,130 @@
 import asyncio as aio
 import ssl
 import struct
-from typing import (Any, ByteString, Iterable, MutableMapping, MutableSet,
-                    Optional, Sequence, Tuple, Union)
+from abc import ABC, abstractmethod
+from typing import (Any, ByteString, Iterable, KeysView, MutableMapping,
+                    MutableSet, Optional, Sequence, Tuple, Union)
 
-_DnsQueries = Union[ByteString, Iterable[ByteString]]
-_DnsAnswers = Union[ByteString, Sequence[bytes]]
-_AioStream = Union[Tuple[aio.StreamReader, aio.StreamWriter], None]
+BytesLike = Union[ByteString, memoryview]
+
+# Maximum amount of time (in seconds) to wait for establishing a tunnel connection
+DEFAULT_CONNECT_TIMEOUT: float = 1.2
 
 
-class BaseDnsTunnel:
+class BaseTunnel(ABC):
     """DNS transport tunnel base class.
 
+    Pure Virtual Properties:
+        - connected
+        - has_queries
+        - has_answers
+        - queries
+        - answers
+
     Pure Virtual Methods:
-        aconnect
-        adisconnect
-        aresolve
+        - __init__
+        - aconnect
+        - adisconnect
+        - aresolve
     """
+    @property
+    @abstractmethod
+    def connected(self) -> bool:
+        """Returns true if the instance is connected to the peer.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def has_queries(self) -> bool:
+        """Returns true if the instance has outstanding queries.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def has_answers(self) -> bool:
+        """Returns true if the instance has outstanding answers.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def queries(self) -> KeysView[int]:
+        """Returns a read-only view of the outstanding queries.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def answers(self) -> KeysView[int]:
+        """Returns a read-only view of the outstanding answers.
+        """
+        ...
+
+    @abstractmethod
     def __init__(self, **kwargs) -> None:
-        """Initialize a BaseDnsTunnel instance.
+        """Initialize a BaseTunnel instance.
         """
         self._loop = aio.get_event_loop()
+
+    @abstractmethod
+    async def aconnect(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> bool:
+        """Asynchronously connect to the peer.
+
+        Args:
+            timeout: The amount of time to wait for this operation (in seconds).
+
+        Returns:
+            True if connected to the peer, False otherwise.
+        """
+        ...
+
+    @abstractmethod
+    async def adisconnect(self, timeout: Optional[float] = None) -> bool:
+        """Asynchronously disconnect from the peer.
+
+        Args:
+            timeout: The amount of time to wait for this operation (in seconds).
+
+        Returns:
+            True if disconnected from the peer, False otherwise.
+        """
+        ...
+
+    @abstractmethod
+    async def aresolve(self, queries: Iterable[BytesLike], timeout: Optional[float] = None) -> Sequence[bytes]:
+        """Asynchronously resolve DNS queries by forwarding to the peer.
+
+        Args:
+            queries: The DNS query packet(s) to forward.
+            timeout: The amount of time to wait for this operation (in seconds).
+
+        Returns:
+            The DNS query response packet(s) or empty bytestring(s) on error.
+        """
+        ...
+
+    async def __aenter__(self) -> 'BaseTunnel':
+        """Enter async context.
+        """
+        await self.aconnect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback) -> None:
+        """Exit async context.
+        """
+        await self.adisconnect()
+
+    def __enter__(self) -> 'BaseTunnel':
+        """Enter context.
+        """
+        return self._loop.run_until_complete(self.__aenter__())
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        """Exit context.
+        """
+        self._loop.run_until_complete(self.__aexit__(exc_type, exc_value, traceback))
 
     def connect(self) -> bool:
         """Synchronously connect to the peer.
@@ -38,68 +142,28 @@ class BaseDnsTunnel:
         """
         return self._loop.run_until_complete(self.adisconnect())
 
-    def resolve(self, query: _DnsQueries) -> _DnsAnswers:
-        """Synchronously resolve a DNS query by forwarding to the peer.
+    def resolve(self, queries: Iterable[BytesLike]) -> Sequence[bytes]:
+        """Synchronously resolve DNS queries by forwarding to the peer.
 
         Args:
-            query: The DNS query packet(s) to forward.
+            queries: The DNS query packet(s) to forward.
 
         Returns:
-            The DNS query response packet(s) or empty bytes string(s) on error.
+            The DNS query response packet(s) or empty bytestring(s) on error.
         """
-        return self._loop.run_until_complete(self.aresolve(query))
-
-    async def aconnect(self, timeout: Optional[float] = None) -> bool:
-        """Asynchronously connect to the peer.
-
-        Note: Must be overridden by sub-classes.
-
-        Args:
-            timeout: The amount of time to wait for this operation (in seconds).
-
-        Returns:
-            True if connected to the peer, False otherwise.
-        """
-        raise NotImplementedError
-
-    async def adisconnect(self, timeout: Optional[float] = None) -> bool:
-        """Asynchronously disconnect from the peer.
-
-        Note: Must be overridden by sub-classes.
-
-        Args:
-            timeout: The amount of time to wait for this operation (in seconds).
-
-        Returns:
-            True if disconnected from the peer, False otherwise.
-        """
-        raise NotImplementedError
-
-    async def aresolve(self, query: _DnsQueries, timeout: Optional[float] = None) -> _DnsAnswers:
-        """Asynchronously resolve a DNS query by forwarding to the peer.
-
-        Args:
-            query: The DNS query packet to forward.
-            timeout: The amount of time to wait for this operation (in seconds).
-
-        Returns:
-            The DNS query response packet or empty bytes string on error.
-        """
-        raise NotImplementedError
+        return self._loop.run_until_complete(self.aresolve(queries))
 
 
-class TcpDnsTunnel(BaseDnsTunnel):
+class TcpTunnel(BaseTunnel):
     """TCP DNS tunnel transport class.
 
     Attributes:
         MAX_SEND_ATTEMPTS: The maximum number of transmissions per send operation.
-        MAX_CONNECTION_TIMEOUT: The amount of time to wait when establishing a connection (in seconds).
     """
     MAX_SEND_ATTEMPTS: int = 3
-    MAX_CONNECTION_TIMEOUT: float = 0.75
 
     def __init__(self, host: str, port: int, auto_connect: bool = True, **kwargs) -> None:
-        """Initialize a TcpDnsTunnel instance.
+        """Initialize a TcpTunnel instance.
 
         Args:
             host: The hostname or address of the peer.
@@ -109,86 +173,107 @@ class TcpDnsTunnel(BaseDnsTunnel):
         """
         super().__init__(**kwargs)
 
-        self.auto_connect = bool(auto_connect)
         self.host: str = str(host)
         self.port: int = int(port)
-
-        self._queries: MutableSet[int] = set()
-        self._answers: MutableMapping[int, bytes] = dict()
+        self.auto_connect = bool(auto_connect)
 
         self._clock = aio.Lock()
-        self._rlock = aio.Lock()
         self._wlock = aio.Lock()
 
-        self._stream: _AioStream = None
+        self._has_queries = aio.Event()
+        self._has_answers = aio.Event()
 
-    def is_closed(self) -> bool:
-        """Returns a boolean value indicating if the underlying transport is closed.
+        self._queries: MutableMapping[int, aio.Event] = dict()
+        self._answers: MutableMapping[int, bytes] = dict()
+
+        self._connected = StateEvent()
+        self._stream: Tuple[aio.StreamReader, aio.StreamWriter] = None
+        self._listener = self._loop.create_task(self._astream_listener())
+
+    def __del__(self) -> None:
+        """Deinitialize a TcpTunnel instance.
         """
-        try: return self._stream[1].transport.is_closing()
-        except TypeError: return True
+        # Cancel the listener if necessary
+        if not self._listener.done():
+            self._listener.cancel()
+            try: self._loop.run_until_complete(self._listener)
+            except aio.CancelledError: pass
 
-    def get_info(self, name: str) -> Any:
-        """Returns information about the underlying transport.
+        # Close the connection to the peer if necessary
+        if self.connected:
+            self._loop.run_until_complete(self.adisconnect())
 
-        Args:
-            name: The transport-specific information to return.
+    @property
+    def connected(self) -> bool:
+        return self._connected.is_set()
 
-        Returns:
-            The requested information or None on error.
-        """
-        try: return self._stream[1].transport.get_extra_info(name)
-        except AttributeError: return None
+    @property
+    def has_queries(self) -> bool:
+        return self._has_queries.is_set()
 
-    async def aconnect(self, timeout: Optional[float] = None) -> bool:
+    @property
+    def has_answers(self) -> bool:
+        return self._has_answers.is_set()
+
+    @property
+    def queries(self) -> KeysView[int]:
+        return self._queries.keys()
+
+    @property
+    def answers(self) -> KeysView[int]:
+        return self._answers.keys()
+
+    async def aconnect(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> bool:
         # Connect to the peer
-        try: return await aio.wait_for(self._aconnect(), timeout)
-        except aio.TimeoutError: return False
+        try:
+            return await aio.wait_for(self._aconnect(), timeout)
+        except aio.TimeoutError:
+            return False
 
     async def adisconnect(self, timeout: Optional[float] = None) -> bool:
         # Disconnect from the peer
         try:
             await aio.wait_for(self._adisconnect(), timeout)
-            return True
         except aio.TimeoutError:
             return False
 
-    async def aresolve(self, query: _DnsQueries, timeout: Optional[float] = None) -> _DnsAnswers:
-        # Check input to determine functionality
-        if isinstance(query, (ByteString, memoryview)):
-            awaitable = self._aresolve(query)
-            default_value = b''
-        else:
-            awaitable = aio.gather(*(self._aresolve(q) for q in query))
-            default_value = []
+        return True
 
-        # Forward DNS queries to the peer
-        try: return await aio.wait_for(awaitable, timeout)
-        except aio.TimeoutError: return default_value
+    async def aresolve(self, queries: Iterable[BytesLike], timeout: Optional[float] = None) -> Sequence[bytes]:
+        if not isinstance(queries, Iterable):
+            raise TypeError('queries - must be a iterable of bytes-like objects')
+
+        # Resolve queries via the peer
+        try:
+            return await aio.wait_for(aio.gather(*(self._aresolve(query) for query in queries)), timeout)
+        except aio.TimeoutError:
+            return []
 
     async def _aconnect(self) -> bool:
-        # Grab the connection lock
         async with self._clock:
             # Connect to the peer if necessary
-            if self.is_closed():
+            if not self.connected:
+                # Establish TCP connection
                 try:
-                    # Establish TCP connection
-                    self._stream = await aio.wait_for(aio.open_connection(self.host, self.port), self.MAX_CONNECTION_TIMEOUT)
-                except Exception:
-                    # Report connection failure
+                    self._stream = await aio.open_connection(self.host, self.port)
+
+                # Handle connection errors
+                except ConnectionError:
                     return False
 
-            # Report connection success
-            return True
+                # Update connection state variable
+                self._connected.set()
+
+        return True
 
     async def _adisconnect(self) -> None:
         writer = None
 
-        # Grab connection lock
+        # Forget the peer connection if connected
         async with self._clock:
-            # Forget the peer connection if necessary
-            if self._stream is not None:
+            if self.connected:
                 writer = self._stream[1]
+                self._connected.clear()
                 self._stream = None
 
         # Perform disconnection
@@ -200,160 +285,175 @@ class TcpDnsTunnel(BaseDnsTunnel):
             try: await writer.wait_closed()
             except AttributeError: pass
 
-    async def _aresolve(self, query: bytes) -> bytes:
-        """Resolve a query using the peer and return an answer.
+    async def _astream_listener(self) -> None:
+        """Asynchronous task that listens for and aggregates peer answer packets.
+        """
+        # Listen for peer answer packets
+        while True:
+            # Wait for a connection to be established
+            await self._connected.wait_true()
+
+            # Wait for outstanding requests
+            await self._has_queries.wait()
+
+            # Wait to receive a answer packet from the peer
+            try:
+                packet = await self._arecv_packet()
+
+            # Handle connection errors
+            except (ConnectionError, aio.IncompleteReadError):
+                # Reset the connection
+                await self.adisconnect()
+                continue
+
+            # Add the answer packet to response tracking
+            self._add_answer(packet)
+
+    async def _aresolve(self, query: BytesLike) -> bytes:
+        """Resolve a query via the peer.
         """
         # Extract query id from packet
-        qid: int = struct.unpack('!H', memoryview(query)[:2])[0]
+        qid = get_short(query)
 
+        # Submit query to tracking
+        self._track_query(qid)
+
+        # Attempt to resolve query
         try:
-            # Attempt to resolve query
             for _ in range(self.MAX_SEND_ATTEMPTS):
                 # Send the query packet to the peer
-                if not await self._asend_query(query, qid):
+                if not await self._asend_query(query):
                     continue
 
-                # Receive answer packet from the peer
+                # Receive the answer packet from the peer
                 answer = await self._arecv_answer(qid)
+                if answer is None:
+                    continue
 
                 # Report resolution result
-                if answer:
-                    return answer
+                return answer
 
-            # Report resolution failure
-            return b''
-
+        # Cleanup any traces of this resolution
         finally:
-            # Cleanup any traces of this resolution
-            self._queries.discard(qid)
-            if qid in self._answers: del self._answers[qid]
+            self._untrack_query(qid)
 
-    async def _asend_query(self, query: bytes, qid: Optional[int] = None) -> bool:
-        """Send a query packet to the peer using a given query id.
+        # Report resolution failure
+        return b''
+
+    async def _asend_query(self, query: BytesLike) -> bool:
+        """Send a query packet to the peer.
         """
-        # Extract query id if necessary
-        if qid is None:
-            qid: int = struct.unpack('!H', memoryview(query)[:2])[0]
-
         # Connect to the peer if necessary
-        if self.auto_connect and not await self._aconnect():
+        if self.auto_connect and not self.connected and not await self.aconnect():
             return False
 
         # Attempt to send the query packet
-        if not await self._asend_packet(query):
+        try:
+            await self._asend_packet(query)
+
+        # Handle connection errors
+        except (TypeError, ConnectionError) as exc:
+            print('DEBUG: _asend_query', exc)
             return False
 
-        # Add query to tracking
-        self._queries.add(qid)
         return True
 
-    async def _arecv_answer(self, qid: int) -> bytes:
-        """Receive a answer packet from the peer for a given query id.
+    async def _arecv_answer(self, qid: int) -> Union[bytes, None]:
+        """Receive the matching answer packet for the given query id.
         """
-        # Wait for the requested answer
-        while True:
-            # Check for matching answer
-            answer = self._get_answer(qid)
-            if answer is not None:
-                return answer
+        # Schedule event waiting as tasks
+        answer_event = self._loop.create_task(self._queries[qid].wait())
+        disconnect_event = self._loop.create_task(self._connected.wait_false())
 
-            # Check if an answer is already being received
-            was_busy = self._rlock.locked()
-            async with self._rlock:
-                # If an answer was being received previously
-                # it is possible the requested answer was received
-                # while waiting so check again before waiting for
-                # a new answer
-                if was_busy:
-                    # Check for matching answer
-                    answer = self._get_answer(qid)
-                    if answer is not None:
-                        return answer
+        # Wait for the matching answer to arrive or a disconnection from the peer
+        await wait_first((answer_event, disconnect_event))
 
-                # Attempt to receive a answer packet
-                packet = await self._arecv_packet()
+        # Check for the matching answer
+        return self._answers.get(qid)
 
-            # Extract answer id from packet
-            try:
-                aid: int = struct.unpack('!H', memoryview(packet)[:2])[0]
-
-            # Handle malformed packet
-            except struct.error:
-                return b''
-
-            # Return the answer if it matches the current query
-            if aid == qid:
-                return packet
-
-            # Add answer to tracking if it matches an outstanding query
-            self._put_answer(packet, aid)
-
-    async def _asend_packet(self, data: bytes) -> bool:
-        # Construct DNS query packet to send
+    async def _asend_packet(self, data: BytesLike) -> None:
+        """Write a DNS packet to the transport stream.
+        """
+        # Construct the DNS query packet to send
         prefix = len(data)
         packet = bytearray(prefix + 2)
         packet[:2] = struct.pack('!H', prefix)
         packet[2:] = data
 
         # Write packet data to the transport stream
-        try:
+        async with self._wlock:
             writer = self._stream[1]
             writer.write(packet)
             await writer.drain()
-            return True
-
-        # Handle connection errors
-        except Exception:
-            return False
 
     async def _arecv_packet(self) -> bytes:
+        """Read a DNS packet from the transport stream.
+        """
         # Read packet data from the transport stream
-        try:
-            reader = self._stream[0]
-            prefix = struct.unpack('!H', await reader.readexactly(2))[0]
-            return await reader.readexactly(prefix)
+        reader = self._stream[0]
+        prefix = struct.unpack('!H', await reader.readexactly(2))[0]
+        return await reader.readexactly(prefix)
 
-        # Handle connection reset
-        except TypeError:
-            return b''
-
-        # Handle premature EOF from the peer
-        except aio.IncompleteReadError:
-            await self._adisconnect()
-            return b''
-
-    def _get_answer(self, qid: int) -> Union[bytes, None]:
-        """Get the answer packet for a given query id.
+    def _track_query(self, qid: int) -> None:
+        """Add a query id to outstanding request tracking.
         """
-        # Check for a matching outstanding query
-        if qid not in self._queries:
-            return b''
+        if qid in self._queries:
+            raise ValueError('qid - already processing query id 0x%x (%d)' % (qid, qid))
 
-        # Check for matching answer
-        return self._answers.get(qid)
+        self._queries[qid] = aio.Event()
 
-    def _put_answer(self, answer: bytes, aid: Optional[int] = None) -> bool:
-        """Put a answer packet for a given answer id.
+        # Indicate that there are now outstanding queries
+        if len(self._queries) == 1:
+            self._has_queries.set()
+
+    def _add_answer(self, answer: BytesLike, qid: Optional[int] = None) -> bool:
+        """Add a answer packet to outstanding response tracking.
         """
-        # Extract answer id if necessary
-        if aid is None:
-            try: aid: int = struct.unpack('!H', memoryview(answer)[:2])[0]
+        # Extract the query id if necessary
+        if qid is None:
+            try: qid = get_short(answer)
             except struct.error: return False
 
-        # Check for matching outstanding query
-        if aid not in self._queries:
+        # Check for the matching outstanding query
+        answer_event = self._queries.get(qid)
+        if answer_event is None:
             return False
 
-        # Add answer to tracking
-        self._answers[aid] = answer
+        # Add the answer to response tracking
+        self._answers[qid] = answer
+        answer_event.set()
+
+        # Indicate that there are now outstanding answers
+        if len(self._answers) == 1:
+            self._has_answers.set()
+
         return True
 
+    def _untrack_query(self, qid: int) -> None:
+        """Remove a query id from outstanding tracking.
+        """
+        # Remove any matching queries
+        if qid in self._queries:
+            del self._queries[qid]
 
-class TlsDnsTunnel(TcpDnsTunnel):
+            # Indicate that there are now no outstanding queries
+            if len(self._queries) == 0:
+                self._has_queries.clear()
+
+        # Remove any matching answers
+        if qid in self._answers:
+            del self._answers[qid]
+
+            # Indicate that there are now no outstanding answers
+            if len(self._answers) == 0:
+                self._has_answers.clear()
+
+
+class TlsTunnel(TcpTunnel):
     """TLS DNS tunnel transport class.
     """
-    def __init__(self, host, port, authname, **kwargs):
-        """Initialize a TlsDnsTunnel instance.
+    def __init__(self, host: str, port: int, authname: str, **kwargs):
+        """Initialize a TlsTunnel instance.
 
         Args:
             host: The hostname or address of the peer.
@@ -361,26 +461,96 @@ class TlsDnsTunnel(TcpDnsTunnel):
             authname: The name used to authenticate the peer.
         """
         super().__init__(host, port, **kwargs)
-        self.authname = authname
+        self.authname = str(authname)
 
         self._context = ssl.create_default_context()
         self._context.check_hostname = True
 
     async def _aconnect(self) -> bool:
-        # Grab the connection lock
         async with self._clock:
             # Connect to the peer if necessary
-            if self.is_closed():
+            if not self.connected:
+                # Establish TLS session
                 try:
-                    # Establish TLS session
                     self._stream = await aio.open_connection(
-                        self.host, self.port,
-                        ssl=self._context,
+                        self.host, self.port, ssl=self._context,
                         server_hostname=self.authname)
 
-                except Exception:
-                    # Report connection failure
+                # Handle connection errors
+                except ConnectionError:
                     return False
 
-            # Report connection success
-            return True
+                # Update connection state variable
+                self._connected.set()
+
+        return True
+
+
+def isbyteslike(obj) -> bool:
+    """Returns true if object provides a bytes-like interface.
+    """
+    return isinstance(obj, (ByteString, memoryview))
+
+def get_short(data: BytesLike, offset: int = 0) -> int:
+    """Returns a short (16-bit unsigned integer) by reading 2-bytes of data.
+
+    Note: The short is expected to be stored in NBO when reading data.
+
+    Args:
+        data: The bytes-like object to read (must be at least 2-bytes long starting at offset).
+        offset: The byte offset to start the 2-byte read.
+    """
+    return struct.unpack('!H', memoryview(data)[offset:offset+2])[0]
+
+async def full_cancel(fut: aio.Future) -> None:
+    """Fully cancels a future by cancelling then awaiting it.
+    """
+    fut.cancel()
+    try: await fut
+    except aio.CancelledError: pass
+
+async def wait_first(futs: Iterable[aio.Future]) -> aio.Future:
+    """Waits for the first future to complete and cancels the rest.
+
+    Returns:
+        The first future to complete.
+    """
+    # Wait for the first future to complete
+    done, pending = await aio.wait(futs, return_when=aio.FIRST_COMPLETED)
+
+    # Cancel the unfinished futures
+    for fut in pending:
+        fut.cancel()
+
+    # Return the first future that finished
+    return done.pop()
+
+
+class StateEvent(aio.Event):
+    """Extends asyncio.Event to provide:
+        - async def wait_true()
+        - async def wait_false()
+    """
+    def __init__(self):
+        super().__init__()
+        self.__ievent = aio.Event()
+        self.__ievent.set()
+
+    wait_true = aio.Event.wait
+    # async def wait_true(self):
+    #     """Wait until the internal flag is true.
+    #     """
+    #     await super().wait()
+
+    async def wait_false(self):
+        """Wait until the internal flag is false.
+        """
+        await self.__ievent.wait()
+
+    def set(self):
+        super().set()
+        self.__ievent.clear()
+
+    def clear(self):
+        super().clear()
+        self.__ievent.set()

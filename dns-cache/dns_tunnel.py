@@ -452,7 +452,7 @@ class TcpTunnel(BaseTunnel):
 class TlsTunnel(TcpTunnel):
     """TLS DNS tunnel transport class.
     """
-    def __init__(self, host: str, port: int, authname: str, **kwargs):
+    def __init__(self, host: str, port: int, authname: str, **kwargs) -> None:
         """Initialize a TlsTunnel instance.
 
         Args:
@@ -531,26 +531,22 @@ class StateEvent(aio.Event):
         - async def wait_true()
         - async def wait_false()
     """
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self.__ievent = aio.Event()
         self.__ievent.set()
 
     wait_true = aio.Event.wait
-    # async def wait_true(self):
-    #     """Wait until the internal flag is true.
-    #     """
-    #     await super().wait()
 
-    async def wait_false(self):
+    async def wait_false(self) -> bool:
         """Wait until the internal flag is false.
         """
-        await self.__ievent.wait()
+        return await self.__ievent.wait()
 
-    def set(self):
+    def set(self) -> None:
         super().set()
         self.__ievent.clear()
 
-    def clear(self):
+    def clear(self) -> None:
         super().clear()
         self.__ievent.set()

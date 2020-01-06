@@ -1,7 +1,9 @@
-import dns_tunnel as dt
-import dnslib as dl
 import random
 import time
+
+import dnslib as dl
+
+import dns_tunnel as dt
 
 hosts = ['google.com', 'python.org', 'example.com', 'reddit.com', 'steam.com']
 
@@ -40,5 +42,5 @@ if __name__ == '__main__':
         print()
         print(s)
         print('connected:', s.connected)
-        print('queries:', s.has_queries, s.queries)
-        print('answers:', s.has_answers, s.answers)
+        print('queries:', s.has_queries, list(s.queries))
+        print('answers:', s.has_answers, list(s.answers))

@@ -315,11 +315,10 @@ class TcpTunnel(BaseTunnel):
         writer = None
 
         # Forget the peer connection if connected
-        async with self._clock:
-            if self.connected:
-                writer = self._stream[1]
-                self._connected.clear()
-                self._stream = None
+        if self.connected:
+            writer = self._stream[1]
+            self._connected.clear()
+            self._stream = None
 
         # Perform disconnection
         if writer is not None:
@@ -346,7 +345,7 @@ class TcpTunnel(BaseTunnel):
                 packet = await self._arecv_packet()
 
             # Handle connection errors
-            except (ConnectionError, aio.IncompleteReadError):
+            except (ConnectionError, aio.IncompleteReadError, TypeError):
                 # Reset the connection
                 await self.adisconnect()
                 continue
@@ -365,8 +364,6 @@ class TcpTunnel(BaseTunnel):
         return self._loop.create_task(self._ahandle_resolve(query, qid))
 
     async def _ahandle_resolve(self, query: BytesLike, qid: int) -> bytes:
-        """Resolve a query via the peer.
-        """
         # Attempt to resolve query
         try:
             # Limit maximum outstanding queries
@@ -404,7 +401,7 @@ class TcpTunnel(BaseTunnel):
             await self._asend_packet(query)
 
         # Handle connection errors
-        except ConnectionError:
+        except (ConnectionError, TypeError):
             return False
 
         return True
@@ -532,10 +529,14 @@ class TlsTunnel(TcpTunnel):
                         server_hostname=self.authname)
 
                 # Handle connection errors
-                except ConnectionError:
+                except (ConnectionError, ssl.SSLError):
                     return False
 
                 # Update connection state variable
                 self._connected.set()
 
         return True
+
+    async def _adisconnect(self) -> None:
+        try: await super()._adisconnect()
+        except ssl.SSLError: pass

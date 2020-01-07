@@ -122,6 +122,9 @@ class StubResolver:
             set_short(context[0], answer)
             return answer
 
+        except ValueError:
+            return b''
+
         finally:
             self._queries.discard(context)
 

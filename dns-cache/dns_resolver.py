@@ -1,135 +1,132 @@
 import asyncio as aio
 import random
+import struct
+from itertools import accumulate
+from typing import (Hashable, Iterable, MutableMapping, MutableSet, Optional,
+                    Sequence, Set, Tuple, Union)
 
-import dns_packet as dp
-import message_stream as ms
+import dns_tunnel as dt
+from dns_util import BytesLike, get_short, set_short
 
 
-class DnsResolver:
+class StubResolver:
     """A DNS stub resolver that forwards requests to upstream recursive servers.
-
-    Attributes:
-        MAX_RETRIES: The maximum number of upstream server queries per resolution.
-        REQUEST_TIMEOUT: The maximum wait time per resolution (in seconds).
     """
-    max_retries: int = 3
-    request_timeout: float = 3.5
-
-    def __init__(self, upstreams=(ms.TlsMessageStream('1.1.1.1', 853, 'cloudflare-dns.com'),), loop=None):
-        """Initialize a DnsResolver instance.
+    def __init__(self, upstreams: Iterable[dt.BaseTunnel]) -> None:
+        """Initialize a StubResolver instance.
 
         Args:
-            upstreams: A sequence of BaseMessageStream instances used for communicating with upstream servers.
-            loop: The async event loop to run on (defaults to current running loop).
+            upstreams: A iterable of BaseTunnel instances used for communicating with upstream servers.
         """
-        # Initialize upstream server stream instances
-        self.upstreams = upstreams
+        self._upstreams: Sequence[dt.BaseTunnel] = tuple(upstreams)
+        self._counters: MutableMapping[int, int] = {id(upstream): 0 for upstream in self._upstreams}
 
-        # Set the current async event loop
-        self.loop = loop or aio.get_event_loop()
+        self._loop = aio.get_event_loop()
 
-        self.requests = {}
-        self.responses = {}
+        self._queries: MutableSet[Tuple[int, Hashable]] = set()
 
-        self._responses = {}
-        self._events = {}
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}(%r)' % (list(self._upstreams),)
 
-    def resolve(self, request: dp.DnsRequest) -> dp.DnsResponse:
-        """Synchronously resolves a DNS request via forwarding to a upstream recursive server.
+    @property
+    def upstreams(self) -> Sequence[dt.BaseTunnel]:
+        """Returns a sequence of upstreams used by the instance.
+        """
+        return self._upstreams
+
+    @property
+    def queries(self) -> Set[Tuple[int, Hashable]]:
+        return set(self._queries)
+
+    def resolve(self, queries: Iterable[BytesLike], identifiers: Optional[Iterable[Hashable]] = None) -> Sequence[bytes]:
+        """Resolve DNS queries.
+        """
+        return self._loop.run_until_complete(self.aresolve(queries, identifiers))
+
+    def resolve_query(self, query: BytesLike, identifier: Optional[Hashable] = None) -> bytes:
+        """Resolve a DNS query.
+        """
+        return self._loop.run_until_complete(self.submit_query(query, identifier))
+
+    async def aresolve(self, queries: Iterable[BytesLike], identifiers: Optional[Iterable[Hashable]] = None) -> Sequence[bytes]:
+        """Asynchronously resolve DNS queries.
+        """
+        return await aio.gather(*self.submit(queries, identifiers))
+
+    async def aresolve_query(self, query: BytesLike, identifier: Optional[Hashable] = None) -> bytes:
+        """Asynchronously resolve a DNS query.
+        """
+        return await self.submit_query(query, identifier)
+
+    def submit(self, queries: Iterable[BytesLike], identifiers: Optional[Iterable[Hashable]] = None) -> Sequence[aio.Task]:
+        """Submit DNS queries to be resolved.
 
         Args:
-            request: The DNS request packet to resolve.
+            queries: The DNS query packet(s) to resolve.
+            identifiers: Optional Hashable identifier(s) (can be used to differentiate queries).
 
         Returns:
-            The DNS response packet.
+            A sequence of asyncio.Task(s) that represent eventual results of the query resolutions.
+            These Task(s) can be awaited to receive the answer packet(s) or empty bytestring(s) on error.
         """
-        return self.loop.run_until_complete(self.aresolve(request))
+        if identifiers is None:
+            return [self.submit_query(query) for query in queries]
 
-    async def aresolve(self, request: dp.DnsRequest) -> dp.DnsResponse:
-        """Asynchronously resolves a DNS request via forwarding to a upstream recursive server.
+        return [self.submit_query(query, identifier) for (query, identifier) in zip(queries, identifiers)]
+
+    def submit_query(self, query: BytesLike, identifier: Optional[Hashable] = None) -> aio.Task:
+        """Submit a DNS query to be resolved.
 
         Args:
-            request: The DNS request packet to resolve.
+            query: The DNS query packet to resolve.
+            identifier: Optional Hashable identifier (can be used to differentiate queries).
 
         Returns:
-            The DNS response packet.
+            A asyncio.Task that represents the eventual result of the query resolution. This
+            Task can be awaited to receive the answer packet or empty bytestring on error.
+        """
+        # Extract query id from query packet
+        qid = get_short(query)
+
+        # Create context tuple
+        context = (qid, identifier)
+
+        # Ensure we are not already processing a matching query
+        if context in self._queries:
+            raise ValueError(f'(query, identifier) - already processing {context}')
+
+        # Select an upstream server to forward query to
+        upstream = self._select_upstream()
+
+        # Get next query id for this upstream server
+        index = id(upstream)
+        counter = self._counters[index]
+        self._counters[index] = (counter + 1) & 0xffff
+
+        # Overwrite query id
+        query = bytearray(query)
+        set_short(counter, query)
+
+        # Create and schedule query resolution task
+        task = upstream.submit_query(query)
+        self._queries.add(context)
+
+        # Schedule wrapper task and return it
+        return self._loop.create_task(self._ahandle_resolve(task, context))
+
+    async def _ahandle_resolve(self, task: aio.Task, context: Tuple[int, Hashable]) -> bytes:
+        """Wrap a upstream server resolution task and replace packet query id.
         """
         try:
-            # Create skeleton DNS response
-            response = request.reply()
-
-            # Assign a query id to this request (used for tracking)
-            query_id = self._queries % 65536
-            self._queries += 1
-
-            # Reset upstream RTTs to prevent drift
-            if self._queries % 10000 == 0:
-                logging.info('DotResolver::resolve: total_queries = %d' % (self._queries))
-                for upstream in self._upstreams:
-                    logging.info('DotResolver::resolve %r: avg_rtt = %f' % (upstream.address, upstream.rtt))
-                    upstream.rtt = 0.0
-
-            # Add request to active tracking
-            self._events[query_id] = aio.Event(loop=self._loop)
-            request.header.id = query_id
-
-            for _ in range(DotResolver.max_retries + 1):
-                # Select a upstream server to forward to
-                upstream = self._select_upstream_rtt()
-
-                # Forward a query packet to the upstream server
-                rtt = self._loop.time()
-                if await upstream.send_query(request.pack()):
-                    break
-            else:
-                raise Exception('max retries reached')
-
-            # Schedule the response to be processed
-            self._loop.create_task(self._process_response(upstream))
-
-            # Wait for request to be serviced
-            await aio.wait_for(self._events[query_id].wait(), DotResolver.request_timeout, loop=self._loop)
-
-            # Fill out response
-            reply = self._responses[query_id]
-            response.add_answer(*reply.rr)
-            response.add_auth(*reply.auth)
-            response.add_ar(*reply.ar)
-
-        except Exception as exc:
-            logging.error('DotResolver::resolve %r %d: %r' % (upstream.address, query_id, exc))
-            response.header.rcode = getattr(dns.RCODE, 'SERVFAIL')
+            answer = bytearray(await task)
+            set_short(context[0], answer)
+            return answer
 
         finally:
-            # Update RTT estimation for selected upstream server
-            rtt = self._loop.time() - rtt
-            upstream.rtt = 0.875 * upstream.rtt + 0.125 * rtt
+            self._queries.discard(context)
 
-            # Remove this request from tracking
-            self._responses.pop(query_id, None)
-            self._events.pop(query_id, None)
-
-            return response
-
-    async def _process_response(self, upstream: DotStream) -> None:
-        try:
-            # Receive an answer packet from the upstream server
-            answer = await upstream.recv_answer()
-
-            # An error occurred with the upstream connection
-            if not answer:
-                raise Exception('failed to receive DNS answer from upstream server')
-
-            # Parse DNS answer packet into a response
-            response = dns.DNSRecord.parse(answer)
-
-            # Add response and signal response complete
-            if response.header.id in self._events:
-                self._responses[response.header.id] = response
-                self._events[response.header.id].set()
-
-        except Exception as exc:
-            logging.error('DotResolver::_process_response %r: %r' % (upstream.address, exc))
-
-    def _select_upstream_random(self) -> ms.BaseMessageStream:
-        return random.choice(self.upstreams)
+    def _select_upstream(self) -> dt.BaseTunnel:
+        """Select an upstream randomly based on tunnel traffic.
+        """
+        cum_weights = tuple(accumulate(upstream.MAX_OUTSTANDING_QUERIES - len(upstream.queries) + 1 for upstream in self._upstreams))
+        return random.choices(self._upstreams, cum_weights=cum_weights)[0]

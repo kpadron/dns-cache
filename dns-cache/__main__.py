@@ -4,6 +4,15 @@ import time
 import dnslib as dl
 
 import dns_tunnel as dt
+import dns_resolver as dr
+
+tunnels = \
+[
+    dt.TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com'),
+    dt.TlsTunnel('1.0.0.1', 853, 'cloudflare-dns.com'),
+    dt.TlsTunnel('2606:4700:4700::1111', 853, 'cloudflare-dns.com'),
+    dt.TlsTunnel('2606:4700:4700::1001', 853, 'cloudflare-dns.com'),
+]
 
 hosts = ['google.com', 'python.org', 'example.com', 'reddit.com', 'steam.com']
 
@@ -18,6 +27,8 @@ times = []
 
 s = None
 
+r = dr.StubResolver(tunnels)
+
 def test_resolve():
     global answers
     global times
@@ -27,6 +38,13 @@ def test_resolve():
     times.append(t)
     print(t * 1000, 'ms')
 
+def test_resolver():
+    global answers, times
+    t = time.time()
+    answers = r.resolve(queries)
+    t = time.time() - t
+    times.append(t)
+    print(t * 1000, 'ms')
 
 if __name__ == '__main__':
     with dt.TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com') as s:
@@ -44,3 +62,21 @@ if __name__ == '__main__':
         print('connected:', s.connected)
         print('queries:', s.has_queries, list(s.queries))
         print('answers:', s.has_answers, list(s.answers))
+
+    times.clear()
+    test_resolver()
+    test_resolver()
+    print('sleeping for 10 s')
+    time.sleep(10)
+    test_resolver()
+    test_resolver()
+    [dl.DNSRecord.parse(answer) for answer in answers]
+    print('queries per second:', num_queries * 4 // sum(times))
+
+    print()
+    print(r)
+    print('upstreams:', r.upstreams)
+    print('queries:', r.queries)
+
+    for tn in tunnels:
+        tn.disconnect()

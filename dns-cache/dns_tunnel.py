@@ -254,13 +254,7 @@ class TcpTunnel(BaseTunnel):
 
         self._connected = StateEvent()
         self._stream: Tuple[aio.StreamReader, aio.StreamWriter] = None
-        self._listener = self._loop.create_task(self._astream_listener())
-
-    def __del__(self) -> None:
-        """Deinitialize a TcpTunnel instance.
-        """
-        if not self._listener.done():
-            self._listener.cancel()
+        self._listener: aio.Task = None
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self.host!r}, {self.port!r}, auto_connect={self.auto_connect!r})'
@@ -292,7 +286,10 @@ class TcpTunnel(BaseTunnel):
                 # Establish TCP connection
                 try:
                     self._stream = await aio.open_connection(self.host, self.port)
+
+                    self._listener = self._loop.create_task(self._astream_listener())
                     self._connected.set()
+
                     return True
 
                 # Handle connection errors
@@ -302,11 +299,16 @@ class TcpTunnel(BaseTunnel):
     async def _adisconnect(self) -> None:
         writer = None
 
-        # Forget the peer connection if connected
         if self.connected:
+            # Forget the peer connection
             writer = self._stream[1]
             self._connected.clear()
-            self._stream = None
+
+            # Cancel the stream listener if necessary
+            if not self._listener.done():
+                self._listener.cancel()
+                try: await self._listener
+                except aio.CancelledError: pass
 
         # Perform disconnection
         if writer is not None:
@@ -320,11 +322,11 @@ class TcpTunnel(BaseTunnel):
     async def _astream_listener(self) -> None:
         """Asynchronous task that listens for and aggregates peer answer packets.
         """
+        # Wait for a connection to be established
+        await self._connected.wait_true()
+
         # Listen for peer answer packets
         while True:
-            # Wait for a connection to be established
-            await self._connected.wait_true()
-
             # Wait for outstanding requests
             await self._has_queries.wait()
 
@@ -334,9 +336,9 @@ class TcpTunnel(BaseTunnel):
 
             # Handle connection errors
             except (ConnectionError, aio.IncompleteReadError, TypeError):
-                # Reset the connection
-                await self.adisconnect()
-                continue
+                # Schedule disconnection
+                self._loop.create_task(self.adisconnect())
+                return
 
             # Add the answer packet to response tracking
             self._add_answer(packet)
@@ -518,7 +520,9 @@ class TlsTunnel(TcpTunnel):
                         self.host, self.port, ssl=self._context,
                         server_hostname=self.authname)
 
+                    self._listener = self._loop.create_task(self._astream_listener())
                     self._connected.set()
+
                     return True
 
                 # Handle connection errors

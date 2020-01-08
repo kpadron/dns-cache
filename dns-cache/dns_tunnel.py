@@ -20,8 +20,8 @@ class BaseTunnel(ABC):
 
     Pure Virtual Methods:
     - __init__
-    - aconnect
-    - adisconnect
+    - _aconnect
+    - _adisconnect
     - submit_query
     """
     # Maximum amount of time (in seconds) to wait for establishing a tunnel connection
@@ -56,21 +56,20 @@ class BaseTunnel(ABC):
 
     @property
     @abstractmethod
-    def queries(self) -> KeysView[int]:
-        """Returns a read-only view of the outstanding queries.
+    def queries(self) -> Sequence[int]:
+        """Returns a snapshot of the current outstanding queries.
         """
         ...
 
     @property
     @abstractmethod
-    def answers(self) -> KeysView[int]:
-        """Returns a read-only view of the outstanding answers.
+    def answers(self) -> Sequence[int]:
+        """Returns a snapshot of the current outstanding answers.
         """
         ...
 
-    @abstractmethod
     async def aconnect(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> bool:
-        """Asynchronously connect to the peer.
+        """Asynchronously connect to the peer with timeout.
 
         Args:
             timeout: The amount of time to wait for this operation (in seconds).
@@ -78,17 +77,27 @@ class BaseTunnel(ABC):
         Returns:
             True if connected to the peer, False otherwise.
         """
-        ...
+        try: return await aio.wait_for(self._aconnect(), timeout)
+        except aio.TimeoutError: return False
 
     @abstractmethod
-    async def adisconnect(self, timeout: Optional[float] = None) -> bool:
-        """Asynchronously disconnect from the peer.
+    async def _aconnect(self) -> bool:
+        """Asynchronously connect to the peer.
+        """
+        ...
+
+    async def adisconnect(self, timeout: float = DEFAULT_CONNECT_TIMEOUT) -> None:
+        """Asynchronously disconnect from the peer with timeout.
 
         Args:
             timeout: The amount of time to wait for this operation (in seconds).
+        """
+        try: await aio.wait_for(self._adisconnect(), timeout)
+        except aio.TimeoutError: pass
 
-        Returns:
-            True if disconnected from the peer, False otherwise.
+    @abstractmethod
+    async def _adisconnect(self) -> None:
+        """Asynchronously disconnect from the peer.
         """
         ...
 
@@ -216,12 +225,13 @@ class TcpTunnel(BaseTunnel):
     MAX_OUTSTANDING_QUERIES: int = 30000
     MAX_SEND_ATTEMPTS: int = 3
 
-    def __init__(self, host: str, port: int, auto_connect: bool = True, **kwargs) -> None:
+    def __init__(self, host: str, port: int, **kwargs) -> None:
         """Initialize a TcpTunnel instance.
 
         Args:
             host: The hostname or address of the peer.
             port: The port number to connect on.
+
             auto_connect: A boolean value indicating if this instance will automatically
                           reconnect to the peer during send operations if disconnected.
         """
@@ -229,7 +239,7 @@ class TcpTunnel(BaseTunnel):
 
         self.host: str = str(host)
         self.port: int = int(port)
-        self.auto_connect = bool(auto_connect)
+        self.auto_connect = bool(kwargs.get('auto_connect', True))
 
         self._limiter = aio.BoundedSemaphore(self.MAX_OUTSTANDING_QUERIES)
 
@@ -249,19 +259,11 @@ class TcpTunnel(BaseTunnel):
     def __del__(self) -> None:
         """Deinitialize a TcpTunnel instance.
         """
-        # Cancel the listener if necessary
         if not self._listener.done():
             self._listener.cancel()
-            try: self._loop.run_until_complete(self._listener)
-            except aio.CancelledError: pass
-
-        # Close the connection to the peer if necessary
-        if self.connected:
-            self._loop.run_until_complete(self.adisconnect())
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}(%r, %r, auto_connect=%r)' % (
-            self.host, self.port, self.auto_connect)
+        return f'{self.__class__.__name__}({self.host!r}, {self.port!r}, auto_connect={self.auto_connect!r})'
 
     @property
     def connected(self) -> bool:
@@ -276,23 +278,12 @@ class TcpTunnel(BaseTunnel):
         return self._has_answers.is_set()
 
     @property
-    def queries(self) -> KeysView[int]:
-        return self._queries.keys()
+    def queries(self) -> Sequence[int]:
+        return list(self._queries)
 
     @property
-    def answers(self) -> KeysView[int]:
-        return self._answers.keys()
-
-    async def aconnect(self, timeout: float = BaseTunnel.DEFAULT_CONNECT_TIMEOUT) -> bool:
-        # Connect to the peer
-        try: return await aio.wait_for(self._aconnect(), timeout)
-        except aio.TimeoutError: return False
-
-    async def adisconnect(self, timeout: Optional[float] = None) -> bool:
-        # Disconnect from the peer
-        try: await aio.wait_for(self._adisconnect(), timeout)
-        except aio.TimeoutError: return False
-        return True
+    def answers(self) -> Sequence[int]:
+        return list(self._answers)
 
     async def _aconnect(self) -> bool:
         async with self._clock:
@@ -301,15 +292,12 @@ class TcpTunnel(BaseTunnel):
                 # Establish TCP connection
                 try:
                     self._stream = await aio.open_connection(self.host, self.port)
+                    self._connected.set()
+                    return True
 
                 # Handle connection errors
                 except ConnectionError:
                     return False
-
-                # Update connection state variable
-                self._connected.set()
-
-        return True
 
     async def _adisconnect(self) -> None:
         writer = None
@@ -382,12 +370,12 @@ class TcpTunnel(BaseTunnel):
                     # Report resolution result
                     return answer
 
+                # Report resolution failure
+                return b''
+
         # Cleanup any traces of this resolution
         finally:
             self._untrack_query(qid)
-
-        # Report resolution failure
-        return b''
 
     async def _asend_query(self, query: BytesLike) -> bool:
         """Send a query packet to the peer.
@@ -399,12 +387,11 @@ class TcpTunnel(BaseTunnel):
         # Attempt to send the query packet
         try:
             await self._asend_packet(query)
+            return True
 
         # Handle connection errors
         except (ConnectionError, TypeError):
             return False
-
-        return True
 
     async def _arecv_answer(self, qid: int) -> Union[bytes, None]:
         """Receive the matching answer packet for the given query id.
@@ -507,16 +494,19 @@ class TlsTunnel(TcpTunnel):
             host: The hostname or address of the peer.
             port: The port number to connect on.
             authname: The name used to authenticate the peer.
+
+            cafile: The file path to CA certificates (in PEM format) used to authenticate the peer.
         """
         super().__init__(host, port, **kwargs)
-        self.authname = str(authname)
 
-        self._context = ssl.create_default_context()
+        self.authname = str(authname)
+        self.cafile = kwargs.get('cafile')
+
+        self._context = ssl.create_default_context(cafile=self.cafile)
         self._context.check_hostname = True
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}(%r, %r, %r, auto_connect=%r)' % (
-            self.host, self.port, self.authname, self.auto_connect)
+        return f'{self.__class__.__name__}({self.host!r}, {self.port!r}, {self.authname!r}, auto_connect={self.auto_connect!r}, cafile={self.cafile!r})'
 
     async def _aconnect(self) -> bool:
         async with self._clock:
@@ -528,14 +518,12 @@ class TlsTunnel(TcpTunnel):
                         self.host, self.port, ssl=self._context,
                         server_hostname=self.authname)
 
+                    self._connected.set()
+                    return True
+
                 # Handle connection errors
                 except (ConnectionError, ssl.SSLError):
                     return False
-
-                # Update connection state variable
-                self._connected.set()
-
-        return True
 
     async def _adisconnect(self) -> None:
         try: await super()._adisconnect()

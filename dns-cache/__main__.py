@@ -1,5 +1,6 @@
 import random
 import time
+import asyncio as aio
 
 import dnslib as dl
 
@@ -73,9 +74,15 @@ if __name__ == '__main__':
     [dl.DNSRecord.parse(answer) for answer in answers]
     print('queries per second:', num_queries * 4 // sum(times))
 
+    try:
+        r.resolve(queries[:5] + [7, 3, 4])
+    except Exception as exc:
+        print(exc)
+
     print()
     print(r)
-    print('upstreams:', r.upstreams)
+    print('tunnels:', r.tunnels)
+    print('counters:', r.counters)
     print('queries:', r.queries)
 
     for tn in tunnels:

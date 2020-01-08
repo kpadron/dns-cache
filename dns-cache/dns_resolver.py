@@ -1,9 +1,9 @@
 import asyncio as aio
+import itertools as it
 import random
 import struct
-from itertools import accumulate
-from typing import (Hashable, Iterable, MutableMapping, MutableSet, Optional,
-                    Sequence, Set, Tuple, Union)
+from typing import (Collection, Hashable, Iterable, Iterator, MutableMapping,
+                    MutableSet, Optional, Sequence, Tuple)
 
 import dns_tunnel as dt
 from dns_util import BytesLike, get_short, set_short
@@ -12,30 +12,38 @@ from dns_util import BytesLike, get_short, set_short
 class StubResolver:
     """A DNS stub resolver that forwards requests to upstream recursive servers.
     """
-    def __init__(self, upstreams: Iterable[dt.BaseTunnel]) -> None:
+    def __init__(self, tunnels: Iterable[dt.BaseTunnel]) -> None:
         """Initialize a StubResolver instance.
 
         Args:
-            upstreams: A iterable of BaseTunnel instances used for communicating with upstream servers.
+            tunnels: A non-empty iterable of BaseTunnel instances used for communicating with upstream servers.
         """
-        self._upstreams: Sequence[dt.BaseTunnel] = tuple(upstreams)
-        self._counters: MutableMapping[int, int] = {id(upstream): 0 for upstream in self._upstreams}
+        self._tunnels: Sequence[dt.BaseTunnel] = list(tunnels)
+        self._counters: MutableMapping[dt.BaseTunnel, int] = {tunnel: 0 for tunnel in self._tunnels}
 
         self._loop = aio.get_event_loop()
 
         self._queries: MutableSet[Tuple[int, Hashable]] = set()
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}(%r)' % (list(self._upstreams),)
+        return f'{self.__class__.__name__}({self._tunnels!r})'
 
     @property
-    def upstreams(self) -> Sequence[dt.BaseTunnel]:
-        """Returns a sequence of upstreams used by the instance.
+    def tunnels(self) -> Sequence[dt.BaseTunnel]:
+        """Returns a sequence of tunnels used by the instance.
         """
-        return self._upstreams
+        return list(self._tunnels)
 
     @property
-    def queries(self) -> Set[Tuple[int, Hashable]]:
+    def counters(self) -> Sequence[int]:
+        """Returns a snapshot of the query counters for each tunnel used by the instance.
+        """
+        return [self._counters[tunnel] for tunnel in self._tunnels]
+
+    @property
+    def queries(self) -> Collection[Tuple[int, Hashable]]:
+        """Returns a snapshot of the current outstanding query contexts submitted to the instance.
+        """
         return set(self._queries)
 
     def resolve(self, queries: Iterable[BytesLike], identifiers: Optional[Iterable[Hashable]] = None) -> Sequence[bytes]:
@@ -69,10 +77,34 @@ class StubResolver:
             A sequence of asyncio.Task(s) that represent eventual results of the query resolutions.
             These Task(s) can be awaited to receive the answer packet(s) or empty bytestring(s) on error.
         """
-        if identifiers is None:
-            return [self.submit_query(query) for query in queries]
+        # Submit queries to the instance
+        tasks = []
+        try:
+            for task in self._submit_gen(queries, identifiers):
+                tasks.append(task)
 
-        return [self.submit_query(query, identifier) for (query, identifier) in zip(queries, identifiers)]
+            return tasks
+
+        # Handle cleanup after exception
+        except Exception:
+            for task in tasks:
+                task.cancel()
+
+            raise
+
+    def _submit_gen(self, queries: Iterable[BytesLike], identifiers: Optional[Iterable[Hashable]] = None) -> Iterator[aio.Task]:
+        """Generator function used to create an iterator when submitting queries to the instance.
+        """
+        if identifiers is None:
+            for query in queries:
+                yield self.submit_query(query)
+
+        else:
+            for (query, identifier) in it.zip_longest(queries, identifiers):
+                if query is None:
+                    break
+
+                yield self.submit_query(query, identifier)
 
     def submit_query(self, query: BytesLike, identifier: Optional[Hashable] = None) -> aio.Task:
         """Submit a DNS query to be resolved.
@@ -84,6 +116,9 @@ class StubResolver:
         Returns:
             A asyncio.Task that represents the eventual result of the query resolution. This
             Task can be awaited to receive the answer packet or empty bytestring on error.
+
+        Raises:
+            ValueError: When attempting to submit a duplicate query context.
         """
         # Extract query id from query packet
         qid = get_short(query)
@@ -93,43 +128,44 @@ class StubResolver:
 
         # Ensure we are not already processing a matching query
         if context in self._queries:
-            raise ValueError(f'(query, identifier) - already processing {context}')
+            raise ValueError(f'(query, identifier) - already processing query context {context}')
 
-        # Select an upstream server to forward query to
-        upstream = self._select_upstream()
+        # Select a tunnel to send the query through
+        tunnel = self._select_tunnel()
 
         # Get next query id for this upstream server
-        index = id(upstream)
-        counter = self._counters[index]
-        self._counters[index] = (counter + 1) & 0xffff
+        counter = self._counters[tunnel]
+        self._counters[tunnel] = (counter + 1) & 0xffff
 
         # Overwrite query id
         query = bytearray(query)
         set_short(counter, query)
 
         # Create and schedule query resolution task
-        task = upstream.submit_query(query)
+        task = tunnel.submit_query(query)
         self._queries.add(context)
 
         # Schedule wrapper task and return it
         return self._loop.create_task(self._ahandle_resolve(task, context))
 
     async def _ahandle_resolve(self, task: aio.Task, context: Tuple[int, Hashable]) -> bytes:
-        """Wrap a upstream server resolution task and replace packet query id.
+        """Wrap a tunnel resolution task and replace packet query id.
         """
         try:
             answer = bytearray(await task)
             set_short(context[0], answer)
             return answer
 
-        except ValueError:
+        except Exception:
             return b''
 
         finally:
             self._queries.discard(context)
 
-    def _select_upstream(self) -> dt.BaseTunnel:
-        """Select an upstream randomly based on tunnel traffic.
+    def _select_tunnel(self) -> dt.BaseTunnel:
+        """Select a tunnel randomly based on total tunnel traffic.
         """
-        cum_weights = tuple(accumulate(upstream.MAX_OUTSTANDING_QUERIES - len(upstream.queries) + 1 for upstream in self._upstreams))
-        return random.choices(self._upstreams, cum_weights=cum_weights)[0]
+        queries = [len(tunnel.queries) for tunnel in self._tunnels]
+        max_weight = max(queries)
+        cum_weights = [max_weight - weight + 1 for weight in queries]
+        return random.choices(self._tunnels, cum_weights=cum_weights)[0]

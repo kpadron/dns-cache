@@ -7,6 +7,8 @@ import dnslib as dl
 import dns_tunnel as dt
 import dns_resolver as dr
 
+loop = aio.get_event_loop()
+
 tunnels = \
 [
     dt.TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com'),
@@ -61,8 +63,8 @@ if __name__ == '__main__':
         print()
         print(s)
         print('connected:', s.connected)
-        print('queries:', s.has_queries, list(s.queries))
-        print('answers:', s.has_answers, list(s.answers))
+        print('queries:', s.has_queries, s.queries)
+        print('answers:', s.has_answers, s.answers)
 
     times.clear()
     test_resolver()
@@ -75,7 +77,8 @@ if __name__ == '__main__':
     print('queries per second:', num_queries * 4 // sum(times))
 
     try:
-        r.resolve(queries[:5] + [7, 3, 4])
+        # r.resolve(queries[:5] + [7, 3, 4])
+        pass
     except Exception as exc:
         print(exc)
 
@@ -87,3 +90,6 @@ if __name__ == '__main__':
 
     for tn in tunnels:
         tn.disconnect()
+    
+    loop.run_until_complete(loop.shutdown_asyncgens())
+    loop.close()

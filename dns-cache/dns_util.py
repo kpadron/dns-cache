@@ -1,15 +1,11 @@
-import asyncio as aio
-import struct
-from typing import ByteString, Iterable, Union
+import asyncio as _aio
+import collections as _collections
+import collections.abc as _collections_abc
+import struct as _struct
+import typing as _typing
 
-BytesLike = Union[ByteString, memoryview]
 
-def isbyteslike(obj) -> bool:
-    """Returns true if object provides a bytes-like interface.
-    """
-    return isinstance(obj, (ByteString, memoryview))
-
-def get_short(data: BytesLike, offset: int = 0) -> int:
+def get_short(data: bytes, offset: int = 0) -> int:
     """Returns a short (16-bit unsigned integer) by reading 2-bytes of data.
 
     Note: The short is expected to be stored in NBO when reading data.
@@ -19,64 +15,112 @@ def get_short(data: BytesLike, offset: int = 0) -> int:
         offset: The byte offset to start the 2-byte read.
 
     Raises:
-        ValueError: When given invalid input data.
+        TypeError: When given unsupported input types.
+        ValueError: When given correct input types with bad values.
     """
-    try: return struct.unpack('!H', memoryview(data)[offset:offset+2])[0]
-    except struct.error:
+    try: 
+        return _struct.unpack('!H', memoryview(data)[offset:offset+2])[0]
+    except _struct.error:
         raise ValueError('data - must be at least 2-bytes long starting at offset')
 
-def set_short(short: int, data: BytesLike, offset: int = 0) -> None:
+def set_short(data: bytearray, value: int, offset: int = 0) -> None:
     """Writes a short (16-bit unsigned integer) by writing 2-bytes at offset in data.
 
     Note: The short is stored in NBO when writing data.
 
     Args:
-        short: The short integer value to write.
         data: The mutable bytes-like object to write to (must be at least 2-bytes long starting at offset).
+        value: The short integer value to write to data.
         offset: The byte offset to start the 2-byte write.
-    """
-    memoryview(data)[offset:offset+2] = struct.pack('!H', int(short) & 0xffff)
 
-async def full_cancel(fut: aio.Future) -> None:
+    Raises:
+        TypeError: When given unsupported input types.
+        ValueError: When given correct input types with bad values.
+    """
+    memoryview(data)[offset:offset+2] = _struct.pack('!H', int(value) & 0xffff)
+
+async def full_cancel(future: _aio.Future) -> None:
     """Fully cancels a future by cancelling then awaiting it.
     """
-    fut.cancel()
-    try: await fut
-    except aio.CancelledError: pass
+    future.cancel()
+    try: await future
+    except _aio.CancelledError: pass
 
-async def wait_first(futs: Iterable[aio.Future], cancel_pending: bool = True) -> aio.Future:
-    """Waits for the first future to complete and returns it.
+async def wait_first(futures: _typing.Iterable[_aio.Future], cancel_pending: bool = True) -> _aio.Future:
+    """Waits for the first future in futures to complete and returns it.
 
     Args:
-        futs: The iterable of futures to wait for.
-        cancel_pending: A boolean value indicating whether to cancel the pending futures.
+        futures: The iterable of futures to wait on.
+        cancel_pending: Whether to cancel the pending futures after waiting.
 
     Returns:
         The first future to complete.
     """
     # Wait for the first future to complete
-    done, pending = await aio.wait(futs, return_when=aio.FIRST_COMPLETED)
+    (done, pending) = await _aio.wait(futures, return_when=_aio.FIRST_COMPLETED)
 
     # Cancel the unfinished futures
     if cancel_pending:
-        for fut in pending:
-            fut.cancel()
+        for future in pending:
+            future.cancel()
+
+        for future in pending:
+            try: await future
+            except _aio.CancelledError: pass
 
     # Return the first future that finished
     return done.pop()
 
+class ContainerView(_collections_abc.Container):
+    """Provides a read-only view for an arbitrary container.
+    """
+    __slots__ = '_container'
 
-class StateEvent(aio.Event):
+    def __init__(self, container: _typing.Container) -> None:
+        self._container = container
+
+    def __contains__(self, x) -> bool:
+        return x in self._container
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}({self._container!r})'
+
+class CollectionView(ContainerView, _collections_abc.Collection):
+    """Provides a read-only view for an arbitrary collection.
+    """
+    __slots__ = ()
+
+    def __iter__(self) -> _typing.Iterator:
+        yield from self._container
+
+    def __len__(self) -> int:
+        return len(self._container)
+
+class SequenceView(CollectionView, _collections_abc.Sequence):
+    """Provides a read-only view for an arbitrary sequence.
+    """
+    __slots__ = ()
+
+    def __getitem__(self, index) -> _typing.Any:
+        return self._container[index]
+
+    def __reversed__(self) -> _typing.Iterator:
+        return reversed(self._container)
+
+class StateEvent(_aio.Event):
     """Extends asyncio.Event to provide:
         - async def wait_true()
         - async def wait_false()
     """
     def __init__(self) -> None:
         super().__init__()
-        self.__ievent = aio.Event()
+        self.__ievent = _aio.Event()
         self.__ievent.set()
 
-    wait_true = aio.Event.wait
+    async def wait_true(self) -> bool:
+        """Wait until the internal flag is true.
+        """
+        return await self.wait()
 
     async def wait_false(self) -> bool:
         """Wait until the internal flag is false.

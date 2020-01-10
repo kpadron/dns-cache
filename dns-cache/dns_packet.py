@@ -9,7 +9,7 @@ class DnsRequest(dnslib.DNSRecord):
     """
     """
     @classmethod
-    def from_packet(cls, packet: bytes) -> DnsRequest:
+    def from_packet(cls, packet: bytes) -> 'DnsRequest':
         """Generate a DnsRequest instance from a DNS query packet.
 
         Args:
@@ -38,7 +38,7 @@ class DnsResponse(dnslib.DNSRecord):
     """
     """
     @classmethod
-    def from_packet(cls, packet: bytes) -> DnsResponse:
+    def from_packet(cls, packet: bytes) -> 'DnsResponse':
         """
         """
         return cls.parse(packet)

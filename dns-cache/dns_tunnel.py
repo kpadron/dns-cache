@@ -146,9 +146,7 @@ class BaseTunnel(_abc.ABC):
             return tasks
 
         except Exception:
-            for task in tasks:
-                await _du.full_cancel(task)
-
+            await _du.cancel_all(tasks)
             raise
 
     @_abc.abstractmethod
@@ -294,7 +292,9 @@ class TcpTunnel(BaseTunnel):
         self._listener: _aio.Task = None
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}({self.host!r}, {self.port!r}, auto_connect={self.auto_connect!r})'
+        r = f'{self.__class__.__name__}({self.host!r}, {self.port!r}'
+        if not self.auto_connect: r += ', auto_connect=False'
+        return r + ')'
 
     @property
     def connected(self) -> bool:
@@ -543,7 +543,10 @@ class TlsTunnel(TcpTunnel):
         self._context.check_hostname = True
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}({self.host!r}, {self.port!r}, {self.authname!r}, auto_connect={self.auto_connect!r}, cafile={self.cafile!r})'
+        r = f'{self.__class__.__name__}({self.host!r}, {self.port!r}, {self.authname!r}'
+        if not self.auto_connect: r += ', auto_connect=False'
+        if self.cafile is not None: r += f', cafile={self.cafile!r}'
+        return r + ')'
 
     async def _aconnect(self) -> bool:
         async with self._clock:

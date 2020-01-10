@@ -42,9 +42,22 @@ def set_short(data: bytearray, value: int, offset: int = 0) -> None:
 async def full_cancel(future: _aio.Future) -> None:
     """Fully cancels a future by cancelling then awaiting it.
     """
-    future.cancel()
-    try: await future
-    except _aio.CancelledError: pass
+    if future.cancel():
+        try: await future
+        except _aio.CancelledError: pass
+
+async def cancel_all(futures: _typing.Iterable[_aio.Future]) -> None:
+    """Fully cancels all futures in a iterable of futures.
+    """
+    cancelled = []
+
+    for future in futures:
+        if future.cancel():
+            cancelled.append(future)
+
+    for future in cancelled:
+        try: await future
+        except _aio.CancelledError: pass
 
 async def wait_first(futures: _typing.Iterable[_aio.Future], cancel_pending: bool = True) -> _aio.Future:
     """Waits for the first future in futures to complete and returns it.
@@ -61,12 +74,7 @@ async def wait_first(futures: _typing.Iterable[_aio.Future], cancel_pending: boo
 
     # Cancel the unfinished futures
     if cancel_pending:
-        for future in pending:
-            future.cancel()
-
-        for future in pending:
-            try: await future
-            except _aio.CancelledError: pass
+        await cancel_all(pending)
 
     # Return the first future that finished
     return done.pop()
@@ -91,7 +99,7 @@ class CollectionView(ContainerView, _collections_abc.Collection):
     __slots__ = ()
 
     def __iter__(self) -> _typing.Iterator:
-        yield from self._container
+        return iter(self._container)
 
     def __len__(self) -> int:
         return len(self._container)

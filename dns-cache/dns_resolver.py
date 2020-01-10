@@ -44,7 +44,7 @@ class StubResolver:
         """
         return _du.CollectionView(self._queries)
 
-    def resolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Optional[_typing.Iterable[_typing.Hashable]] = None) -> _typing.Sequence[bytes]:
+    def resolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[bytes]:
         """Resolve DNS queries.
         """
         return self._loop.run_until_complete(self.aresolve(queries, identifiers))
@@ -54,7 +54,7 @@ class StubResolver:
         """
         return self._loop.run_until_complete(self.aresolve_query(query, identifier))
 
-    def submit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Optional[_typing.Iterable[_typing.Hashable]] = None) -> _typing.Sequence[_aio.Task]:
+    def submit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[_aio.Task]:
         """Synchronously submit DNS queries to be resolved.
 
         Args:
@@ -70,7 +70,7 @@ class StubResolver:
         """
         return self._loop.run_until_complete(self.asubmit(queries, identifiers))
 
-    def submit_query(self, query: bytes, identifier: _typing.Optional[_typing.Hashable] = None) -> _aio.Task:
+    def submit_query(self, query: bytes, identifier: _typing.Hashable = None) -> _aio.Task:
         """Synchronously submit a DNS query to be resolved.
 
         Args:
@@ -86,17 +86,17 @@ class StubResolver:
         """
         return self._loop.run_until_complete(self.asubmit_query(query, identifier))
 
-    async def aresolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Optional[_typing.Iterable[_typing.Hashable]] = None) -> _typing.Sequence[bytes]:
+    async def aresolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[bytes]:
         """Asynchronously resolve DNS queries.
         """
         return await _aio.gather(*(await self.asubmit(queries, identifiers)))
 
-    async def aresolve_query(self, query: bytes, identifier: _typing.Optional[_typing.Hashable] = None) -> bytes:
+    async def aresolve_query(self, query: bytes, identifier: _typing.Hashable = None) -> bytes:
         """Asynchronously resolve a DNS query.
         """
         return await (await self.asubmit_query(query, identifier))
 
-    async def asubmit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Optional[_typing.Iterable[_typing.Hashable]] = None) -> _typing.Sequence[_aio.Task]:
+    async def asubmit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[_aio.Task]:
         """Asynchronously submit DNS queries to be resolved.
 
         Args:
@@ -139,7 +139,7 @@ class StubResolver:
 
             raise
 
-    async def asubmit_query(self, query: bytes, identifier: _typing.Optional[_typing.Hashable] = None) -> _aio.Task:
+    async def asubmit_query(self, query: bytes, identifier: _typing.Hashable = None) -> _aio.Task:
         """Asynchronously submit a DNS query to be resolved.
 
         Args:

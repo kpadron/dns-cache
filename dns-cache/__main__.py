@@ -19,7 +19,7 @@ tunnels = \
 
 hosts = ['google.com', 'python.org', 'example.com', 'reddit.com', 'steam.com']
 
-num_queries = 10000
+num_queries = 30000
 queries = [dl.DNSRecord.question(random.choice(hosts)) for i in range(num_queries)]
 for (index, query) in enumerate(queries):
     query.header.id = index

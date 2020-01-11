@@ -1,60 +1,65 @@
-import asyncio as _aio
-import itertools as _it
-import random as _random
-import typing as _typing
+import asyncio as aio
+import itertools as it
+import random
+import typing
 
-import dns_tunnel as _dt
-import dns_util as _du
+import dns_tunnel as dt
+import dns_util as du
 
+__all__ = \
+[
+    'StubResolver',
+    'CachedResolver',
+]
 
 class StubResolver:
     """A DNS stub resolver that forwards requests to upstream recursive servers.
     """
-    def __init__(self, tunnels: _typing.Iterable[_dt.BaseTunnel]) -> None:
+    def __init__(self, tunnels: typing.Iterable[dt.BaseTunnel]) -> None:
         """Initialize a StubResolver instance.
 
         Args:
             tunnels: A non-empty iterable of BaseTunnel instances used for communicating with upstream servers.
         """
-        self._tunnels: _typing.Sequence[_dt.BaseTunnel] = list(tunnels)
-        self._counters: _typing.Sequence[int] = [0] * len(self._tunnels)
+        self._tunnels: typing.Sequence[dt.BaseTunnel] = list(tunnels)
+        self._counters: typing.Sequence[int] = [0] * len(self._tunnels)
 
-        self._loop = _aio.get_event_loop()
+        self._loop = aio.get_event_loop()
 
-        self._queries: _typing.MutableSet[_typing.Tuple[int, _typing.Hashable]] = set()
+        self._queries: typing.MutableSet[typing.Tuple[int, typing.Hashable]] = set()
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self._tunnels!r})'
 
     @property
-    def tunnels(self) -> _typing.Sequence[_dt.BaseTunnel]:
+    def tunnels(self) -> typing.Sequence[dt.BaseTunnel]:
         """Returns a read-only view of the tunnels used by the instance.
         """
-        return _du.SequenceView(self._tunnels)
+        return du.SequenceView(self._tunnels)
 
     @property
-    def counters(self) -> _typing.Sequence[int]:
+    def counters(self) -> typing.Sequence[int]:
         """Returns a read-only view of the query counters for each tunnel used by the instance.
         """
-        return _du.SequenceView(self._counters)
+        return du.SequenceView(self._counters)
 
     @property
-    def queries(self) -> _typing.Collection[_typing.Tuple[int, _typing.Hashable]]:
+    def queries(self) -> typing.Collection[typing.Tuple[int, typing.Hashable]]:
         """Returns a read-only view of the outstanding query contexts submitted to the instance.
         """
-        return _du.CollectionView(self._queries)
+        return du.CollectionView(self._queries)
 
-    def resolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[bytes]:
+    def resolve(self, queries: typing.Iterable[bytes], identifiers: typing.Iterable[typing.Hashable] = None) -> typing.Sequence[bytes]:
         """Resolve DNS queries.
         """
         return self._loop.run_until_complete(self.aresolve(queries, identifiers))
 
-    def resolve_query(self, query: bytes, identifier: _typing.Optional[_typing.Hashable] = None) -> bytes:
+    def resolve_query(self, query: bytes, identifier: typing.Optional[typing.Hashable] = None) -> bytes:
         """Resolve a DNS query.
         """
         return self._loop.run_until_complete(self.aresolve_query(query, identifier))
 
-    def submit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[_aio.Task]:
+    def submit(self, queries: typing.Iterable[bytes], identifiers: typing.Iterable[typing.Hashable] = None) -> typing.Sequence[aio.Task]:
         """Synchronously submit DNS queries to be resolved.
 
         Args:
@@ -70,7 +75,7 @@ class StubResolver:
         """
         return self._loop.run_until_complete(self.asubmit(queries, identifiers))
 
-    def submit_query(self, query: bytes, identifier: _typing.Hashable = None) -> _aio.Task:
+    def submit_query(self, query: bytes, identifier: typing.Hashable = None) -> aio.Task:
         """Synchronously submit a DNS query to be resolved.
 
         Args:
@@ -86,17 +91,17 @@ class StubResolver:
         """
         return self._loop.run_until_complete(self.asubmit_query(query, identifier))
 
-    async def aresolve(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[bytes]:
+    async def aresolve(self, queries: typing.Iterable[bytes], identifiers: typing.Iterable[typing.Hashable] = None) -> typing.Sequence[bytes]:
         """Asynchronously resolve DNS queries.
         """
-        return await _aio.gather(*(await self.asubmit(queries, identifiers)))
+        return await aio.gather(*(await self.asubmit(queries, identifiers)))
 
-    async def aresolve_query(self, query: bytes, identifier: _typing.Hashable = None) -> bytes:
+    async def aresolve_query(self, query: bytes, identifier: typing.Hashable = None) -> bytes:
         """Asynchronously resolve a DNS query.
         """
         return await (await self.asubmit_query(query, identifier))
 
-    async def asubmit(self, queries: _typing.Iterable[bytes], identifiers: _typing.Iterable[_typing.Hashable] = None) -> _typing.Sequence[_aio.Task]:
+    async def asubmit(self, queries: typing.Iterable[bytes], identifiers: typing.Iterable[typing.Hashable] = None) -> typing.Sequence[aio.Task]:
         """Asynchronously submit DNS queries to be resolved.
 
         Args:
@@ -111,13 +116,13 @@ class StubResolver:
             ValueError: When attempting to submit a duplicate query context.
         """
         # Async generator function used to create an async iterator of tasks
-        async def agen_tasks() -> _typing.AsyncIterator[_aio.Task]:
+        async def agen_tasks() -> typing.AsyncIterator[aio.Task]:
             if identifiers is None:
                 for query in queries:
                     yield await self.asubmit_query(query)
 
             else:
-                for (query, identifier) in _it.zip_longest(queries, identifiers):
+                for (query, identifier) in it.zip_longest(queries, identifiers):
                     if query is None:
                         break
 
@@ -135,11 +140,11 @@ class StubResolver:
         # Handle cleanup after exception
         except Exception:
             for task in tasks:
-                await _du.full_cancel(task)
+                await du.full_cancel(task)
 
             raise
 
-    async def asubmit_query(self, query: bytes, identifier: _typing.Hashable = None) -> _aio.Task:
+    async def asubmit_query(self, query: bytes, identifier: typing.Hashable = None) -> aio.Task:
         """Asynchronously submit a DNS query to be resolved.
 
         Args:
@@ -154,7 +159,7 @@ class StubResolver:
             ValueError: When attempting to submit a duplicate query context.
         """
         # Extract query id from query packet
-        qid = _du.get_short(query)
+        qid = du.get_short(query)
 
         # Create context tuple
         context = (qid, identifier)
@@ -173,7 +178,7 @@ class StubResolver:
 
         # Overwrite query id
         query = bytearray(query)
-        _du.set_short(query, counter)
+        du.set_short(query, counter)
 
         # Create and schedule query resolution task
         task = await tunnel.asubmit_query(query)
@@ -182,12 +187,12 @@ class StubResolver:
         # Schedule wrapper task and return it
         return self._loop.create_task(self._ahandle_resolve(task, context))
 
-    async def _ahandle_resolve(self, task: _aio.Task, context: _typing.Tuple[int, _typing.Hashable]) -> bytes:
+    async def _ahandle_resolve(self, task: aio.Task, context: typing.Tuple[int, typing.Hashable]) -> bytes:
         """Wrap a tunnel resolution task and replace packet query id.
         """
         try:
             answer = bytearray(await task)
-            _du.set_short(answer, context[0])
+            du.set_short(answer, context[0])
             return answer
 
         except Exception:
@@ -196,10 +201,22 @@ class StubResolver:
         finally:
             self._queries.discard(context)
 
-    def _select_tunnel(self) -> _dt.BaseTunnel:
+    def _select_tunnel(self) -> dt.BaseTunnel:
         """Select a tunnel randomly based on total tunnel traffic.
         """
         queries = [len(tunnel.queries) for tunnel in self._tunnels]
         max_weight = max(queries)
         cum_weights = [max_weight - weight + 1 for weight in queries]
-        return _random.choices(self._tunnels, cum_weights=cum_weights)[0]
+        return random.choices(self._tunnels, cum_weights=cum_weights)[0]
+
+
+class CachedResolver(StubResolver):
+    """
+    """
+    def __init__(self, tunnels: typing.Iterable[dt.BaseTunnel]) -> None:
+        """
+        """
+        raise NotImplementedError
+
+    async def asubmit_query(self, query: bytes, identifier: typing.Hashable = None) -> aio.Task:
+        raise NotImplementedError

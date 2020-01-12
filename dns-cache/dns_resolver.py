@@ -8,8 +8,9 @@ import dns_util as du
 
 __all__ = \
 [
-    'StubResolver',
+    'AutoResolver',
     'CachedResolver',
+    'StubResolver',
 ]
 
 class StubResolver:

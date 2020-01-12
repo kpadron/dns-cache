@@ -8,15 +8,15 @@ from collections.abc import Collection, Container, Sequence
 
 __all__ = \
 [
-    'ContainerView',
     'CollectionView',
+    'ContainerView',
+    'LruCache',
     'SequenceView',
     'StateEvent',
-    'LruCache',
+    'cancel_all',
+    'full_cancel',
     'get_short',
     'set_short',
-    'full_cancel',
-    'cancel_all',
     'wait_first',
 ]
 
@@ -53,17 +53,13 @@ class SequenceView(CollectionView, Sequence):
     """
     __slots__ = ()
 
-    def __getitem__(self, index) -> typing.Any:
+    def __getitem__(self, index: int) -> typing.Any:
         return self._container[index]
-
-    def __reversed__(self) -> typing.Iterator:
-        return reversed(self._container)
 
 
 class LruCache(OrderedDict):
     """Generic cache class utilizing the least-recently-used eviction policy.
     """
-
     def __init__(self, size: int = None) -> None:
         """Initialize a LruCache instance.
 
@@ -79,13 +75,13 @@ class LruCache(OrderedDict):
         self._hits = 0
         self._evictions = 0
 
-    def __getitem__(self, key: typing.Hashable) -> typing.Any:
-        """Lookup a value in the cache using a key.
+    def get(self, key: typing.Hashable, default: typing.Any = None) -> typing.Any:
+        """Get a value from the cache using a key.
 
         If the entry exists in the cache it is updated to be the most-recently-used.
         """
         try:
-            value = super().__getitem__(key)
+            value = self[key]
             self.move_to_end(key)
             self._lookups += 1
             self._hits += 1
@@ -93,24 +89,18 @@ class LruCache(OrderedDict):
 
         except KeyError:
             self._lookups += 1
-            raise
+            return default
 
-    def __setitem__(self,  key: typing.Hashable, value: typing.Hashable) -> None:
-        """Set a value to the cache using a key.
+    def set(self, key: typing.Hashable, value: typing.Hashable) -> None:
+        """Set a value in the cache using a key.
 
         If the entry already existed in the cache it is updated to be the most-recently-used.
 
         If the operation would cause the cache to grow beyond its max size then the
-        least-recently-used cache entry is evicted.
+        least-recently-used cache entries are evicted.
         """
-        super().__setitem__(key, value)
+        self[key] = value
         self.trim()
-
-    def get(self, key: typing.Hashable, default: typing.Any = None) -> typing.Any:
-        """Returns the value mapped from key if it exists otherwise return default.
-        """
-        try: return self[key]
-        except KeyError: return default
 
     def trim(self) -> None:
         """Ensures the cache is bounded by the size attribute removing entries if necessary.

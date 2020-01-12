@@ -12,6 +12,7 @@ __all__ = \
     'Answer',
 ]
 
+NOERROR = dl.RCODE.NOERROR
 FORMERR = dl.RCODE.FORMERR
 NOTIMP = dl.RCODE.NOTIMP
 OPT = dl.QTYPE.OPT
@@ -19,38 +20,53 @@ OPT = dl.QTYPE.OPT
 class Packet(dl.DNSRecord):
     """DNS packet class.
     """
+    @classmethod
+    def question(cls, qname: str, qtype: str = 'A', qclass: str = 'IN') -> 'Packet':
+        """Initialize a packet from a simple question.
+        """
+        return cls(q=Question(qname, getattr(dl.QTYPE, qtype), getattr(dl.CLASS, qclass)))
 
     @classmethod
-    def question(cls, q):
-        pass
-
-    @classmethod
-    def from_data(cls, data: bytes) -> 'Packet':
+    def decode(cls, data: bytes) -> 'Packet':
         """Initialize a Packet instance from DNS packet data.
         """
         try:
-            p = super().parse(data)
-
-            if len(p.questions) != 1:
-                r = p.reply()
-                r.header.rcode = FORMERR
-                return r
-
-            return p
+            return cls.parse(data)
 
         except dl.DNSError:
             return None
+
+    def encode(self) -> bytes:
+        """Encode the instance to DNS packet data.
+        """
+        return self.pack()
 
     def get_question(self) -> 'Question':
         """Extract the question from the instance.
         """
         q = self.q
-        return Question(q.qname, q.qclass, q.qtype)
+        return Question(q.qname, q.qtype, q.qclass)
 
     def get_answer(self) -> 'Answer':
         """Extract the answer from the instance.
         """
-        return Answer()
+        return Answer(self.rr, self.auth, self.ar)
+
+    def set_answer(self, answer: 'Answer') -> None:
+        """Set the answer resource records for this instance.
+        """
+        self.rr = list(answer.answer())
+        self.auth = list(answer.authority())
+        self.ar = list(answer.additional())
+
+    def set_response(self, rcode: int = NOERROR) -> None:
+        """Marks the packet as a query response and sets the rcode.
+        """
+        self.header.rcode = rcode
+        self.header.qr = 1
+        self.header.aa = 1
+        self.header.ra = 1
+
 
 class Question(dl.DNSQuestion):
     def __hash__(self) -> int:

@@ -16,20 +16,20 @@ class BaseTunnel(ABC):
     """DNS transport tunnel base class.
 
     Pure Virtual Properties:
-    - connected
-    - has_queries
-    - has_answers
-    - queries
-    - answers
+        - connected
+        - has_queries
+        - has_answers
+        - queries
+        - answers
 
     Pure Virtual Methods:
-    - __init__
-    - _aconnect
-    - _adisconnect
-    - asubmit_query
+        - __init__
+        - _aconnect
+        - _adisconnect
+        - asubmit_query
     """
     # Maximum amount of time (in seconds) to wait for establishing a tunnel connection
-    DEFAULT_CONNECT_TIMEOUT: float = 1.2
+    DEFAULT_CONNECT_TIMEOUT: float = 1.5
 
     @abstractmethod
     def __init__(self, **kwargs) -> None:
@@ -105,7 +105,7 @@ class BaseTunnel(ABC):
         """
         ...
 
-    async def aresolve(self, queries: typing.Iterable[bytes], timeout: typing.Optional[float] = None) -> typing.Sequence[bytes]:
+    async def aresolve(self, queries: typing.Iterable[bytes], timeout: float = None) -> typing.Sequence[bytes]:
         """Asynchronously resolve DNS queries by forwarding to the peer.
 
         Args:
@@ -118,7 +118,7 @@ class BaseTunnel(ABC):
         try: return await aio.wait_for(aio.gather(*(await self.asubmit(queries))), timeout)
         except aio.TimeoutError: return []
 
-    async def aresolve_query(self, query: bytes, timeout: typing.Optional[float] = None) -> bytes:
+    async def aresolve_query(self, query: bytes, timeout: float = None) -> bytes:
         """Asynchronously resolve a DNS query by forwarding to the peer.
 
         Args:

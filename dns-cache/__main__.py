@@ -1,11 +1,12 @@
+import asyncio as aio
 import random
 import time
-import asyncio as aio
 
 import dnslib as dl
 
-import dns_tunnel as dt
+import dns_packet as dp
 import dns_resolver as dr
+import dns_tunnel as dt
 
 loop = aio.get_event_loop()
 
@@ -20,10 +21,7 @@ tunnels = \
 hosts = ['google.com', 'python.org', 'example.com', 'reddit.com', 'steam.com']
 
 num_queries = 30000
-queries = [dl.DNSRecord.question(random.choice(hosts)) for i in range(num_queries)]
-for (index, query) in enumerate(queries):
-    query.header.id = index
-    queries[index] = query.pack()
+queries = [dp.Question(random.choice(hosts)) for i in range(num_queries)]
 
 answers = []
 times = []
@@ -50,22 +48,6 @@ def test_resolver():
     print(t * 1000, 'ms')
 
 if __name__ == '__main__':
-    with dt.TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com') as s:
-        test_resolve()
-        test_resolve()
-        print('sleeping for 10 s')
-        time.sleep(10)
-        test_resolve()
-        test_resolve()
-        [dl.DNSRecord.parse(answer) for answer in answers]
-        print('queries per second:', num_queries * 4 // sum(times))
-
-        print()
-        print(s)
-        print('connected:', s.connected)
-        print('queries:', s.has_queries, s.queries)
-        print('answers:', s.has_answers, s.answers)
-
     times.clear()
     test_resolver()
     test_resolver()
@@ -73,7 +55,6 @@ if __name__ == '__main__':
     time.sleep(10)
     test_resolver()
     test_resolver()
-    [dl.DNSRecord.parse(answer) for answer in answers]
     print('queries per second:', num_queries * 4 // sum(times))
 
     try:
@@ -90,6 +71,6 @@ if __name__ == '__main__':
 
     for tn in tunnels:
         tn.disconnect()
-    
+
     loop.run_until_complete(loop.shutdown_asyncgens())
     loop.close()

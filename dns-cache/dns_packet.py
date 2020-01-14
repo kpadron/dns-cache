@@ -15,6 +15,7 @@ __all__ = \
 NOERROR = dl.RCODE.NOERROR
 FORMERR = dl.RCODE.FORMERR
 NOTIMP = dl.RCODE.NOTIMP
+SERVFAIL = dl.RCODE.SERVFAIL
 OPT = dl.QTYPE.OPT
 
 class Packet(dl.DNSRecord):
@@ -50,11 +51,12 @@ class Packet(dl.DNSRecord):
     def get_answer(self) -> 'Answer':
         """Extract the answer from the instance.
         """
-        return Answer(self.rr, self.auth, self.ar)
+        return Answer(self.header.rcode, self.rr, self.auth, self.ar)
 
     def set_answer(self, answer: 'Answer') -> None:
         """Set the answer resource records for this instance.
         """
+        self.set_response(answer.rcode)
         self.rr = list(answer.answer())
         self.auth = list(answer.authority())
         self.ar = list(answer.additional())
@@ -69,24 +71,38 @@ class Packet(dl.DNSRecord):
 
 
 class Question(dl.DNSQuestion):
+    """DNS question class.
+    """
     def __hash__(self) -> int:
-        return hash((self.qname, self.qclass))
+        return hash((self.qname, self.qtype))
 
     def __eq__(self, other) -> bool:
-        attrs = ('qname', 'qclass', 'qtype')
+        attrs = ('qname', 'qtype', 'qclass')
         return all(getattr(self, attr) == getattr(other, attr) for attr in attrs)
 
+    def to_query(self, id: int = None) -> bytes:
+        """Generate a new DNS query packet from this question.
+        """
+        buffer = dl.DNSBuffer()
+        dl.DNSHeader(id=id, q=1).pack(buffer)
+        self.pack(buffer)
+        return buffer.data
+
+
 class Answer:
-    def __init__(self, answer: typing.Iterable[dl.RR], authority: typing.Iterable[dl.RR], additional: typing.Iterable[dl.RR]) -> None:
+    """DNS answer class.
+    """
+    def __init__(self, rcode: int = NOERROR, answer: typing.Iterable[dl.RR] = [], authority: typing.Iterable[dl.RR] = [], additional: typing.Iterable[dl.RR] = []) -> None:
         """Initialize the Answer instance.
         """
         self._time = time.monotonic()
 
+        self._rcode = rcode
         self._answer = list(self._strip_records(answer))
         self._authority = list(self._strip_records(authority))
         self._additional = list(self._strip_records(additional))
 
-        self._min_ttl = min(record.ttl for record in self.records())
+        self._min_ttl = None
 
     @staticmethod
     def _strip_records(records: typing.Iterable[dl.RR]) -> typing.Iterator[dl.RR]:
@@ -98,27 +114,33 @@ class Answer:
 
             yield record
 
-    def answer(self) -> typing.Iterator:
+    @property
+    def rcode(self) -> int:
+        """Returns the rcode for the instance.
+        """
+        return self._rcode
+
+    def answer(self) -> typing.Iterator[dl.RR]:
         """Returns an iterator over all answer records.
         """
         return iter(self._answer)
 
-    def authority(self) -> typing.Iterator:
+    def authority(self) -> typing.Iterator[dl.RR]:
         """Returns an iterator over all authority records.
         """
         return iter(self._authority)
 
-    def additional(self) -> typing.Iterator:
+    def additional(self) -> typing.Iterator[dl.RR]:
         """Returns an iterator over all additional records.
         """
         return iter(self._additional)
 
-    def sections(self) -> typing.Iterator:
+    def sections(self) -> typing.Iterator[typing.Iterator[dl.RR]]:
         """Returns an iterator over all sections.
         """
-        return it.chain(self._answers, self._authority, self._additional)
+        return it.chain(self.answer(), self.authority(), self.additional())
 
-    def records(self) -> typing.Iterator:
+    def records(self) -> typing.Iterator[dl.RR]:
         """Returns an iterator over records in all sections.
         """
         return it.chain.from_iterable(self.sections())
@@ -127,19 +149,22 @@ class Answer:
     def ttl(self) -> float:
         """Returns the minimum ttl of all instance records.
         """
+        if self._min_ttl is None:
+            self._min_ttl = min(record.ttl for record in self.records())
+
         return self._min_ttl
 
     @property
     def age(self) -> float:
         """Returns the age of the instance.
         """
-        return time.time() - self._time
+        return time.monotonic() - self._time
 
     @property
     def expiration(self) -> float:
         """Returns the time at which the instance will expire.
         """
-        return self._time + self._min_ttl
+        return self._time + self.ttl
 
     @property
     def time_left(self) -> float:
@@ -151,4 +176,4 @@ class Answer:
     def expired(self) -> bool:
         """Returns whether the instance has expired or not.
         """
-        return self.age > self._min_ttl
+        return self.age > self.ttl

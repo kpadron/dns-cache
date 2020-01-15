@@ -91,7 +91,7 @@ class LruCache(OrderedDict):
             self._lookups += 1
             return default
 
-    def set(self, key: typing.Hashable, value: typing.Hashable) -> None:
+    def add(self, key: typing.Hashable, value: typing.Any) -> None:
         """Set a value in the cache using a key.
 
         If the entry already existed in the cache it is updated to be the most-recently-used.

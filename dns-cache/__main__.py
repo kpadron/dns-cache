@@ -7,6 +7,7 @@ import dnslib as dl
 import dns_packet as dp
 import dns_resolver as dr
 import dns_tunnel as dt
+import dns_util as du
 
 loop = aio.get_event_loop()
 
@@ -28,7 +29,8 @@ times = []
 
 s = None
 
-r = dr.StubResolver(tunnels)
+c = du.LruCache(10000)
+r = dr.CachedResolver(tunnels, c)
 
 def test_resolve():
     global answers
@@ -55,7 +57,7 @@ if __name__ == '__main__':
     time.sleep(10)
     test_resolver()
     test_resolver()
-    print('queries per second:', num_queries * 4 // sum(times))
+    print('questions per second:', num_queries * 4 // sum(times))
 
     try:
         # r.resolve(queries[:5] + [7, 3, 4])
@@ -67,7 +69,13 @@ if __name__ == '__main__':
     print(r)
     print('tunnels:', r.tunnels)
     print('counters:', r.counters)
-    print('queries:', r.queries)
+    print('questions:', r.questions)
+
+    print()
+    print(c)
+    print('stats:', c.stats)
+
+    # print(answers)
 
     for tn in tunnels:
         tn.disconnect()

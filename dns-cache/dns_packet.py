@@ -14,7 +14,6 @@ __all__ = \
 
 NOERROR = dl.RCODE.NOERROR
 FORMERR = dl.RCODE.FORMERR
-NOTIMP = dl.RCODE.NOTIMP
 SERVFAIL = dl.RCODE.SERVFAIL
 OPT = dl.QTYPE.OPT
 
@@ -104,6 +103,9 @@ class Answer:
 
         self._min_ttl = None
 
+    def __repr__(self) -> str:
+        return f'<Answer: rcode={self.rcode!r} records={list(self.records())!r}>'
+
     @staticmethod
     def _strip_records(records: typing.Iterable[dl.RR]) -> typing.Iterator[dl.RR]:
         """Returns a iterator of records with all unsupported records removed.
@@ -135,15 +137,11 @@ class Answer:
         """
         return iter(self._additional)
 
-    def sections(self) -> typing.Iterator[typing.Iterator[dl.RR]]:
-        """Returns an iterator over all sections.
-        """
-        return it.chain(self.answer(), self.authority(), self.additional())
-
     def records(self) -> typing.Iterator[dl.RR]:
         """Returns an iterator over records in all sections.
         """
-        return it.chain.from_iterable(self.sections())
+        for section in (self.answer(), self.authority(), self.additional()):
+            yield from section
 
     @property
     def ttl(self) -> float:

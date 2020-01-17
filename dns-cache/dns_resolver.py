@@ -1,91 +1,97 @@
 import asyncio as aio
 import itertools as it
-import random
-import typing
+from typing import (Awaitable, Collection, Iterable, Iterator, MutableMapping,
+                    Optional, Sequence)
 
 import dns_packet as dp
-import dns_tunnel as dt
 import dns_util as du
+from dns_packet import Answer, Question
+from dns_tunnel import AbstractTunnel
+from dns_util import Cache
 
 __all__ = \
 [
-    'AutoResolver',
-    'CachedResolver',
     'StubResolver',
+    'CachedResolver',
+    'AutoResolver',
 ]
 
+
 class StubResolver:
-    """A DNS stub resolver that forwards requests to upstream recursive servers.
-    """
-    def __init__(self, tunnels: typing.Iterable[dt.BaseTunnel]) -> None:
-        """Initialize a StubResolver instance.
+    """A DNS stub resolver that forwards requests to upstream recursive servers."""
+    def __init__(self, tunnels: Iterable[AbstractTunnel]) -> None:
+        """
+        Initializes a StubResolver instance.
 
         Args:
-            tunnels: A non-empty iterable of BaseTunnel instances.
+            tunnels: A non-empty iterable of AbstractTunnel instances.
         """
         self._loop = aio.get_event_loop()
 
-        self._tunnels: typing.Sequence[dt.BaseTunnel] = list(tunnels)
-        self._counters: typing.Sequence[int] = [0] * len(self._tunnels)
+        self._tunnels: Sequence[AbstractTunnel] = list(tunnels)
+        self._counters: Sequence[int] = [0] * len(self._tunnels)
+        self._schedule: Iterator[int] = it.cycle(range(len(self._tunnels)))
 
-        self._queries: typing.MutableMapping[dp.Question, aio.Task] = {}
+        # TODO: Attempt to use futures here maybe with weakref dict as well
+        self._queries: MutableMapping[Question, aio.Future] = {}
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self._tunnels!r})'
 
     @property
-    def tunnels(self) -> typing.Sequence[dt.BaseTunnel]:
-        """Returns a read-only view of the tunnels used by the instance.
-        """
+    def tunnels(self) -> Sequence[AbstractTunnel]:
+        """Returns a read-only view of the tunnels used by the instance."""
         return du.SequenceView(self._tunnels)
 
     @property
-    def counters(self) -> typing.Sequence[int]:
-        """Returns a read-only view of the query counters for each tunnel used by the instance.
-        """
+    def counters(self) -> Sequence[int]:
+        """Returns a read-only view of the query counters for each tunnel used by the instance."""
         return du.SequenceView(self._counters)
 
     @property
-    def questions(self) -> typing.Collection[dp.Question]:
-        """Returns a read-only view of the outstanding questions submitted to the instance.
-        """
+    def questions(self) -> Collection[Question]:
+        """Returns a read-only view of the outstanding questions submitted to the instance."""
         return self._queries.keys()
 
-    def resolve(self, questions: typing.Iterable[dp.Question]) -> typing.Sequence[dp.Answer]:
-        """Resolve DNS question(s).
-        """
+    def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
+        """Resolves DNS questions."""
         return self._loop.run_until_complete(self.batch(questions))
 
-    def resolve_question(self, question: dp.Question) -> dp.Answer:
-        """Resolve a DNS question.
-        """
+    def resolve_question(self, question: Question) -> Answer:
+        """Resolves a DNS question."""
         return self._loop.run_until_complete(self.submit_question(question))
 
-    def batch(self, questions: typing.Iterable[dp.Question]) -> aio.Task:
-        """Submit DNS question(s) to be resolved.
+    def batch(self, questions: Iterable[Question]) -> Awaitable[Sequence[Answer]]:
+        """
+        Batches DNS questions to be resolved.
 
         Returns:
-            A task object that represents the eventual results of all given questions.
-            The task object can be awaited to receive the sequence of answers.
+            A awaitable object that represents the eventual answers to all given questions.
+            When awaited the object yields the sequence of answers.
         """
         return aio.gather(*(self.submit_question(question) for question in questions))
 
-    def submit(self, questions: typing.Iterable[dp.Question]) -> typing.Sequence[aio.Task]:
-        """Submit DNS question(s) to be resolved.
+    def submit(self, questions: Iterable[Question]) -> Sequence[Awaitable[Answer]]:
+        """
+        Submits DNS questions to be resolved.
 
         Returns:
-            A sequence of task objects(s) that represent eventual answer(s) to the question(s).
-            These task object(s) can be awaited to receive the answer(s).
+            A sequence of awaitable objects that represent eventual answers to the questions.
+            When awaited the objects yield the answers.
         """
         return [self.submit_question(question) for question in questions]
 
-    def submit_question(self, question: dp.Question) -> aio.Task:
-        """Submit a DNS question to be resolved.
+    def submit_question(self, question: Question) -> Awaitable[Answer]:
+        """
+        Submits a DNS question to be resolved.
 
         Returns:
-            A task object that represents the eventual answer to the question.
-            This task object can be awaited to receive the answer.
+            A awaitable object that represents the eventual answer to the question.
+            When awaited the object yields the answer.
         """
+        return du.AwaitableView(self._submit_question(question))
+
+    def _submit_question(self, question: Question) -> Awaitable[Answer]:
         # Return the original task if this is a duplicate question
         task = self._queries.get(question)
         if task is not None:
@@ -103,45 +109,43 @@ class StubResolver:
         query_packet = question.to_query(counter)
 
         # Create and schedule query resolution task
-        task = tunnel.submit_query(query_packet)
+        answer_packet = tunnel.submit_query(query_packet)
 
         # Schedule wrapper task
-        task = self._loop.create_task(self._ahandle_answer(question, task))
+        # TODO: just return awaitable instead of scheduling
+        task = self._loop.create_task(self._ahandle_answer(question, answer_packet))
 
         # Add task to tracking
         self._queries[question] = task
 
         return task
 
-    async def _ahandle_answer(self, question: dp.Question, task: aio.Task) -> dp.Answer:
-        """Wrap a tunnel resolution task and return a DNS query answer.
-        """
-        try: return dp.Packet.parse(await task).get_answer()
-        except Exception: return dp.Answer(dp.SERVFAIL)
+    async def _ahandle_answer(self, question: Question, answer_packet: Awaitable[bytes]) -> Awaitable[Answer]:
+        """Wraps a tunnel resolution task and returns a DNS query answer."""
+        try: return dp.Packet.parse(await answer_packet).get_answer()
+        except Exception: return Answer(dp.SERVFAIL)
         finally: del self._queries[question]
 
-    def _select_tunnel(self) -> dt.BaseTunnel:
-        """Select a tunnel index randomly based on total tunnel traffic.
-        """
-        queries = [len(tunnel.queries) for tunnel in self._tunnels]
-        max_weight = max(queries)
-        cum_weights = [max_weight - weight + 1 for weight in queries]
-        return random.choices(range(len(self._tunnels)), cum_weights=cum_weights)[0]
+    def _select_tunnel(self) -> int:
+        """Selects a tunnel index based on a round-robin schedule."""
+        return next(self._schedule)
+
 
 class CachedResolver(StubResolver):
     """A DNS stub resolver that caches answers.
     """
-    def __init__(self, tunnels: typing.Iterable[dt.BaseTunnel], **kwargs) -> None:
+    def __init__(self, tunnels: Iterable[AbstractTunnel], cache: Optional[Cache] = None) -> None:
         """Initialize a CachedResolver instance.
 
         Args:
-            cache - A Cache instance used to store answer records.
+            tunnels: A non-empty iterable of AbstractTunnel instances.
+            cache: A Cache instance used to store answer records.
         """
         super().__init__(tunnels)
 
-        self._cache: typing.MutableMapping[dp.Question, dp.Answer] = kwargs.get('cache', du.LruCache(10000))
+        self._cache: MutableMapping[Question, Answer] = cache or du.LruCache(10000)
 
-    def resolve(self, questions: typing.Iterable[dp.Question]) -> typing.Sequence[dp.Answer]:
+    def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
         # Check the cache for the answers first
         answers, indices = [], []
         for (index, question) in enumerate(questions):
@@ -167,16 +171,13 @@ class CachedResolver(StubResolver):
         # Schedule the resolution for the question
         return super().resolve_question(question)
 
-    def submit_question(self, question: dp.Question) -> aio.Task:
-        async def answer_wrapper(answer: dp.Answer) -> dp.Answer:
-            """Simple answer wrapper that can be scheduled as a task.
-            """
-            return answer
-
+    def submit_question(self, question: Question) -> Awaitable[Answer]:
         # Check the cache for the answer first
-        answer = self._cache.get(question)
+        answer = self._cache.get_entry(question)
         if answer is not None and not answer.expired:
-            return self._loop.create_task(answer_wrapper(answer))
+            future = self._loop.create_future()
+            future.set_result(answer)
+            return du.AwaitableView(future)
 
         # Schedule the resolution for the question
         return super().submit_question(question)
@@ -192,7 +193,7 @@ class CachedResolver(StubResolver):
 class AutoResolver(CachedResolver):
     """A DNS stub resolver that caches answers and auto refreshes cache entries.
     """
-    def __init__(self, tunnels: typing.Iterable[dt.BaseTunnel], **kwargs) -> None:
+    def __init__(self, tunnels: Iterable[AbstractTunnel], **kwargs) -> None:
         """Initialize a AutoResolver instance.
 
         Args:

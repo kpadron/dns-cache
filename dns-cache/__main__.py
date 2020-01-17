@@ -30,7 +30,7 @@ times = []
 s = None
 
 c = du.LruCache(10000)
-r = dr.CachedResolver(tunnels, cache=c)
+r = dr.StubResolver(tunnels)
 
 def test_resolve():
     global answers

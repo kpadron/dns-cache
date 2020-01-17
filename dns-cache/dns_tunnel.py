@@ -1,4 +1,5 @@
 import asyncio as aio
+import weakref as wref
 import ssl
 from abc import ABC, abstractmethod
 from typing import (Awaitable, Collection, MutableMapping, Optional, Tuple,
@@ -8,23 +9,22 @@ import dns_util as du
 
 __all__ = \
 [
-    'BaseTunnel',
+    'AbstractTunnel',
     'TcpTunnel',
     'TlsTunnel',
 ]
 
 
-class BaseTunnel(ABC):
+class AbstractTunnel(ABC):
     """
     DNS transport tunnel abstract base class.
 
     Pure Virtual Properties:
         connected: Whether the tunnel is connected or not.
-        queries: View of the outstanding queries.
 
     Pure Virtual Methods:
         __init__: Initializes a new class instance.
-        submit_query: Submits a DNS query to be resolved.
+        _submit_query: Submits a DNS query to be resolved.
         _aconnect: Connects to the tunnel peer.
         _adisconnect: Disconnects from the tunnel peer.
     """
@@ -60,12 +60,6 @@ class BaseTunnel(ABC):
         """Returns true if the instance is connected to the peer."""
         ...
 
-    @property
-    @abstractmethod
-    def queries(self) -> Collection[int]:
-        """Returns a read-only view of the outstanding queries."""
-        ...
-
     def connect(self) -> bool:
         """
         Synchronously connect to the peer.
@@ -84,7 +78,6 @@ class BaseTunnel(ABC):
         """
         return self._loop.run_until_complete(self.adisconnect())
 
-    @abstractmethod
     def submit_query(self, query: bytes) -> Awaitable[bytes]:
         """
         Submit a DNS query for resolution via the peer.
@@ -96,7 +89,7 @@ class BaseTunnel(ABC):
             A awaitable object that represents the eventual result of the resolution.
             When awaited the object yields the response packet or an empty bytestring on error.
         """
-        ...
+        return du.AwaitableView(self._submit_query(query))
 
     def resolve_query(self, query: bytes) -> bytes:
         """
@@ -108,7 +101,7 @@ class BaseTunnel(ABC):
         Returns:
             The DNS response packet or empty bytestring on error.
         """
-        return self._loop.run_until_complete(self.submit_query(query))
+        return self._loop.run_until_complete(self._submit_query(query))
 
     async def aconnect(self, timeout: float = DEFAULT_TIMEOUT) -> Awaitable[bool]:
         """
@@ -136,8 +129,22 @@ class BaseTunnel(ABC):
         Returns:
             The DNS response packet or empty bytestring on error.
         """
-        try: return await aio.wait_for(self.submit_query(query), timeout)
+        try: return await aio.wait_for(self._submit_query(query), timeout)
         except aio.TimeoutError: return b''
+
+    @abstractmethod
+    def _submit_query(self, query: bytes) -> Awaitable[bytes]:
+        """
+        Submit a DNS query for resolution via the peer.
+
+        Args:
+            query: The DNS query packet to resolve.
+
+        Returns:
+            A awaitable object that represents the eventual result of the resolution.
+            When awaited the object yields the response packet or an empty bytestring on error.
+        """
+        ...
 
     @abstractmethod
     async def _aconnect(self) -> Awaitable[bool]:
@@ -155,7 +162,7 @@ class BaseTunnel(ABC):
         ...
 
 
-class TcpTunnel(BaseTunnel):
+class TcpTunnel(AbstractTunnel):
     """TCP DNS tunnel transport class."""
     # Maximum number of outstanding queries before new submissions will block
     MAX_OUTSTANDING_QUERIES: int = 30000
@@ -185,7 +192,7 @@ class TcpTunnel(BaseTunnel):
         self._wlock = aio.Lock()
 
         self._has_queries = aio.Event()
-        self._futures: MutableMapping[int, aio.Future] = {}
+        self._futures: MutableMapping[int, aio.Future] = wref.WeakValueDictionary()
 
         self._connected = du.StateEvent()
         self._stream: Union[Tuple[aio.StreamReader, aio.StreamWriter], None] = None
@@ -204,21 +211,10 @@ class TcpTunnel(BaseTunnel):
     def queries(self) -> Collection[int]:
         return self._futures.keys()
 
-    def submit_query(self, query: bytes) -> Awaitable[bytes]:
+    def _submit_query(self, query: bytes) -> Awaitable[bytes]:
         # Extract query id from packet
         qid = du.get_short(query)
 
-        # Submit query to tracking
-        future = self._track_query(qid)
-
-        # Schedule the resolution of this query
-        self._loop.create_task(self._ahandle_resolve(query, qid, future))
-
-        # Return the future
-        return future
-
-    def _track_query(self, qid: int) -> aio.Future:
-        """Add a query and future to outstanding request tracking and return the future."""
         # Disallow duplicate queries
         if qid in self._futures:
             raise ValueError('qid - already processing query id 0x%x (%d)' % (qid, qid))
@@ -227,45 +223,23 @@ class TcpTunnel(BaseTunnel):
         future = self._loop.create_future()
         self._futures[qid] = future
 
-        # Indicate that there are now outstanding queries
-        if len(self._futures) == 1:
-            self._has_queries.set()
+        # Schedule the resolution of this query
+        self._loop.create_task(self._ahandle_resolve(query, qid))
 
+        # Return the future
         return future
 
-    def _set_answer(self, answer: bytes, qid: int = None) -> None:
-        """Marks the matching future as done and sets its result to answer."""
-        # Extract the query id if necessary
-        if qid is None:
-            try: qid = du.get_short(answer)
-            except ValueError: return
+    async def _ahandle_resolve(self, query: bytes, qid: int) -> Awaitable[None]:
+        """Asynchronous task that handles the query resolution process."""
+        # Limit maximum outstanding queries
+        async with self._limiter:
+            # Get the relevant future object for this query
+            future = self._futures.get(qid)
+            if future is None:
+                return
 
-        # Check for the matching future
-        future = self._futures.get(qid)
-        if future is None:
-            return
-
-        # Mark the future as done and set its result
-        future.set_result(answer)
-
-    def _untrack_query(self, qid: int, future: aio.Future) -> None:
-        """Remove a query and future from outstanding request tracking."""
-        # Ensure the matching future is done
-        if not future.done():
-            future.set_result(b'')
-
-        # Remove the query and matching future from tracking
-        del self._futures[qid]
-
-        # Indicate that there are now no outstanding queries
-        if len(self._futures) == 0:
-            self._has_queries.clear()
-
-    async def _ahandle_resolve(self, query: bytes, qid: int, future: aio.Future) -> Awaitable[None]:
-        # Attempt to resolve query
-        try:
-            # Limit maximum outstanding queries
-            async with self._limiter:
+            # Attempt to resolve the query
+            try:
                 # Exhaust all allowable send attempts
                 for _ in range(self.MAX_SEND_ATTEMPTS):
                     # Send the query packet to the peer
@@ -276,12 +250,49 @@ class TcpTunnel(BaseTunnel):
                     if await self._await_answer(future):
                         return
 
-        # Cleanup any traces of this resolution
-        finally:
-            self._untrack_query(qid, future)
+                # Mark the future as failed
+                if not future.done():
+                    future.set_result(b'')
+
+            # Cleanup any traces of this resolution
+            finally:
+                del self._futures[qid]
+
+    async def _astream_listener(self) -> Awaitable[None]:
+        """Asynchronous task that listens for peer answer packets."""
+        # Wait for a connection to be established
+        await self._connected.wait_true()
+
+        # Listen for peer answer packets
+        while True:
+            # Wait to receive a answer packet from the peer
+            try:
+                packet = await self._arecv_packet()
+
+            # Handle connection errors
+            except (ConnectionError, aio.IncompleteReadError):
+                # Schedule disconnection
+                self._loop.create_task(self.adisconnect())
+                return
+
+            # Extract the query id from the answer packet
+            try: qid = du.get_short(packet)
+            except ValueError: continue
+
+            # Check for the matching future
+            future = self._futures.get(qid)
+            if future is None:
+                continue
+
+            # Mark the future as done and set its result
+            if not future.done():
+                future.set_result(packet)
+
+            # Destroy future reference
+            del future
 
     async def _asend_query(self, query: bytes) -> Awaitable[bool]:
-        """Send a query packet to the peer."""
+        """Sends a query packet to the peer."""
         # Connect to the peer if necessary
         if self.auto_connect and not self.connected and not await self.aconnect():
             return False
@@ -296,7 +307,8 @@ class TcpTunnel(BaseTunnel):
             return False
 
     async def _await_answer(self, future: aio.Future) -> Awaitable[bool]:
-        """Wait for the matching answer packet or a disconnect from the peer."""
+        """Waits for the matching answer packet or a disconnect from the peer."""
+        # Wait for the first future to finish
         disconnect = self._loop.create_task(self._connected.wait_false())
         (done, _) = await aio.wait((future, disconnect), return_when=aio.FIRST_COMPLETED)
         disconnect.cancel()
@@ -336,10 +348,8 @@ class TcpTunnel(BaseTunnel):
                 # Establish TCP connection
                 try:
                     self._stream = await aio.open_connection(self.host, self.port)
-
                     self._listener = self._loop.create_task(self._astream_listener())
                     self._connected.set()
-
                     return True
 
                 # Handle connection errors
@@ -352,11 +362,8 @@ class TcpTunnel(BaseTunnel):
         if self.connected:
             # Forget the peer connection
             writer = self._stream[1]
+            self._listener.cancel()
             self._connected.clear()
-
-            # Cancel the stream listener if necessary
-            if not self._listener.done():
-                await du.full_cancel(self._listener)
 
         # Perform disconnection
         if writer is not None:
@@ -367,34 +374,12 @@ class TcpTunnel(BaseTunnel):
             try: await writer.wait_closed()
             except AttributeError: pass
 
-    async def _astream_listener(self) -> Awaitable[None]:
-        """Asynchronous task that listens for and aggregates peer answer packets."""
-        # Wait for a connection to be established
-        await self._connected.wait_true()
-
-        # Listen for peer answer packets
-        while True:
-            # Wait for outstanding requests
-            await self._has_queries.wait()
-
-            # Wait to receive a answer packet from the peer
-            try:
-                packet = await self._arecv_packet()
-
-            # Handle connection errors
-            except (ConnectionError, aio.IncompleteReadError):
-                # Schedule disconnection
-                self._loop.create_task(self.adisconnect())
-                return
-
-            # Add the answer packet to the relevant future
-            self._set_answer(packet)
-
 
 class TlsTunnel(TcpTunnel):
     """TLS DNS tunnel transport class."""
     def __init__(self, host: str, port: int, authname: str, cafile: Optional[str] = None, auto_connect: bool = True) -> None:
-        """Initialize a TlsTunnel instance.
+        """
+        Initialize a TlsTunnel instance.
 
         Args:
             host: The hostname or address of the peer.
@@ -418,7 +403,7 @@ class TlsTunnel(TcpTunnel):
         if not self.auto_connect: r += ', False'
         return r + ')'
 
-    async def _aconnect(self) -> bool:
+    async def _aconnect(self) -> Awaitable[bool]:
         async with self._clock:
             # Connect to the peer if necessary
             if not self.connected:
@@ -437,6 +422,6 @@ class TlsTunnel(TcpTunnel):
                 except (ConnectionError, ssl.SSLError):
                     return False
 
-    async def _adisconnect(self) -> None:
+    async def _adisconnect(self) -> Awaitable[None]:
         try: await super()._adisconnect()
         except ssl.SSLError: pass

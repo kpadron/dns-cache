@@ -1,11 +1,11 @@
 import asyncio as aio
-import weakref as wref
 import ssl
+import weakref as wref
 from abc import ABC, abstractmethod
 from typing import (Awaitable, Collection, MutableMapping, Optional, Tuple,
                     Union)
 
-import dns_util as du
+from . import utility as utl
 
 __all__ = \
 [
@@ -69,13 +69,8 @@ class AbstractTunnel(ABC):
         """
         return self._loop.run_until_complete(self.aconnect())
 
-    def disconnect(self) -> bool:
-        """
-        Synchronously disconnect from the peer.
-
-        Returns:
-            True if disconnected from the peer, False otherwise.
-        """
+    def disconnect(self) -> None:
+        """Synchronously disconnect from the peer."""
         return self._loop.run_until_complete(self.adisconnect())
 
     def submit_query(self, query: bytes) -> Awaitable[bytes]:
@@ -89,7 +84,7 @@ class AbstractTunnel(ABC):
             A awaitable object that represents the eventual result of the resolution.
             When awaited the object yields the response packet or an empty bytestring on error.
         """
-        return du.AwaitableView(self._submit_query(query))
+        return utl.AwaitableView(self._submit_query(query))
 
     def resolve_query(self, query: bytes) -> bytes:
         """
@@ -194,7 +189,7 @@ class TcpTunnel(AbstractTunnel):
         self._has_queries = aio.Event()
         self._futures: MutableMapping[int, aio.Future] = wref.WeakValueDictionary()
 
-        self._connected = du.StateEvent()
+        self._connected = utl.StateEvent()
         self._stream: Union[Tuple[aio.StreamReader, aio.StreamWriter], None] = None
         self._listener: Union[aio.Task, None] = None
 
@@ -213,7 +208,7 @@ class TcpTunnel(AbstractTunnel):
 
     def _submit_query(self, query: bytes) -> Awaitable[bytes]:
         # Extract query id from packet
-        qid = du.get_short(query)
+        qid = utl.get_short(query)
 
         # Disallow duplicate queries
         if qid in self._futures:
@@ -276,7 +271,7 @@ class TcpTunnel(AbstractTunnel):
                 return
 
             # Extract the query id from the answer packet
-            try: qid = du.get_short(packet)
+            try: qid = utl.get_short(packet)
             except ValueError: continue
 
             # Check for the matching future
@@ -325,7 +320,7 @@ class TcpTunnel(AbstractTunnel):
         # Construct the DNS query packet to send
         prefix = len(data)
         packet = bytearray(prefix + 2)
-        du.set_short(packet, prefix)
+        utl.set_short(packet, prefix)
         packet[2:] = data
 
         # Write packet data to the transport stream
@@ -338,7 +333,7 @@ class TcpTunnel(AbstractTunnel):
         """Read a DNS packet from the transport stream."""
         # Read packet data from the transport stream
         reader = self._stream[0]
-        prefix = du.get_short(await reader.readexactly(2))
+        prefix = utl.get_short(await reader.readexactly(2))
         return await reader.readexactly(prefix)
 
     async def _aconnect(self) -> Awaitable[bool]:

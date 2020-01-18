@@ -3,11 +3,11 @@ import itertools as it
 from typing import (Awaitable, Collection, Iterable, Iterator, MutableMapping,
                     Optional, Sequence)
 
-import dns_packet as dp
-import dns_util as du
-from dns_packet import Answer, Question
-from dns_tunnel import AbstractTunnel
-from dns_util import Cache
+from . import packet as pkt
+from . import utility as utl
+from .packet import Answer, Question
+from .tunnel import AbstractTunnel
+from .utility import Cache
 
 __all__ = \
 [
@@ -41,12 +41,12 @@ class StubResolver:
     @property
     def tunnels(self) -> Sequence[AbstractTunnel]:
         """Returns a read-only view of the tunnels used by the instance."""
-        return du.SequenceView(self._tunnels)
+        return utl.SequenceView(self._tunnels)
 
     @property
     def counters(self) -> Sequence[int]:
         """Returns a read-only view of the query counters for each tunnel used by the instance."""
-        return du.SequenceView(self._counters)
+        return utl.SequenceView(self._counters)
 
     @property
     def questions(self) -> Collection[Question]:
@@ -89,7 +89,7 @@ class StubResolver:
             A awaitable object that represents the eventual answer to the question.
             When awaited the object yields the answer.
         """
-        return du.AwaitableView(self._submit_question(question))
+        return utl.AwaitableView(self._submit_question(question))
 
     def _submit_question(self, question: Question) -> Awaitable[Answer]:
         # Return the original task if this is a duplicate question
@@ -122,8 +122,8 @@ class StubResolver:
 
     async def _ahandle_answer(self, question: Question, answer_packet: Awaitable[bytes]) -> Awaitable[Answer]:
         """Wraps a tunnel resolution task and returns a DNS query answer."""
-        try: return dp.Packet.parse(await answer_packet).get_answer()
-        except Exception: return Answer(dp.SERVFAIL)
+        try: return pkt.Packet.parse(await answer_packet).get_answer()
+        except Exception: return Answer(pkt.SERVFAIL)
         finally: del self._queries[question]
 
     def _select_tunnel(self) -> int:
@@ -143,7 +143,7 @@ class CachedResolver(StubResolver):
         """
         super().__init__(tunnels)
 
-        self._cache: MutableMapping[Question, Answer] = cache or du.LruCache(10000)
+        self._cache: MutableMapping[Question, Answer] = cache or utl.LruCache(10000)
 
     def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
         # Check the cache for the answers first
@@ -162,7 +162,7 @@ class CachedResolver(StubResolver):
 
         return answers
 
-    def resolve_question(self, question: dp.Question) -> dp.Answer:
+    def resolve_question(self, question: pkt.Question) -> pkt.Answer:
         # Check the cache for the answer first
         answer = self._cache.get(question)
         if answer is not None and not answer.expired:
@@ -177,14 +177,14 @@ class CachedResolver(StubResolver):
         if answer is not None and not answer.expired:
             future = self._loop.create_future()
             future.set_result(answer)
-            return du.AwaitableView(future)
+            return utl.AwaitableView(future)
 
         # Schedule the resolution for the question
         return super().submit_question(question)
 
-    async def _ahandle_answer(self, question: dp.Question, task: aio.Task) -> dp.Answer:
+    async def _ahandle_answer(self, question: pkt.Question, task: aio.Task) -> pkt.Answer:
         answer = await super()._ahandle_answer(question, task)
-        if answer.rcode == dp.NOERROR:
+        if answer.rcode == pkt.NOERROR:
             self._cache.add(question, answer)
 
         return answer

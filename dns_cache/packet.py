@@ -164,7 +164,7 @@ class Packet(DNSRecord):
     def get_question(self) -> Question:
         """Extract the question from the instance."""
         q = self.q
-        return Question(q.qname, q.qtype, q.qclass)
+        return Question(q.qname, dl.QTYPE[q.qtype], dl.CLASS[q.qclass])
 
     def get_answer(self) -> Answer:
         """Extract the answer from the instance."""

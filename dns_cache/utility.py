@@ -274,7 +274,7 @@ class StateEvent:
         """Waits until the internal flag is true."""
         return self._event.wait()
 
-    async def wait_false(self) -> Awaitable[bool]:
+    def wait_false(self) -> Awaitable[bool]:
         """Waits until the internal flag is false."""
         return self._ievent.wait()
 

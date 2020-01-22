@@ -11,6 +11,7 @@ random.seed(0xDEADBEEF, 2)
 
 TEST_DOMAINS = ('google.com', 'spotify.com', 'reddit.com', 'steam.com', 'python.org')
 TEST_QUESTIONS = tuple(Question(domain) for domain in TEST_DOMAINS)
+TEST_QUERIES = tuple(question.to_query(i) for (i, question) in enumerate(TEST_QUESTIONS))
 TEST_SIZE = 1000
 
 
@@ -22,11 +23,33 @@ class TestTcpTunnel(TestCase):
         del self.tunnel
 
     def test_connect_disconnect(self):
-        self.assertTrue(self.tunnel.connect(), 'failed to connect')
+        self.tunnel.connect(10)
         self.assertTrue(self.tunnel.connected, 'connected attribute is incorrect')
 
-        self.tunnel.disconnect()
+        self.tunnel.disconnect(10)
         self.assertFalse(self.tunnel.connected, 'connected attribute is incorrect')
+
+    def test_resolve_query(self, queries=TEST_QUERIES):
+        with self.tunnel as tunnel:
+            for query_packet in queries:
+                answer_packet = tunnel.resolve_query(query_packet)
+                self._check_answer_packet(query_packet, answer_packet)
+
+    def test_submit_and_complete(self, queries=TEST_QUERIES):
+        pending = []
+
+        with self.tunnel as tunnel:
+            for query_packet in queries:
+                pending_answer = tunnel.submit_query(query_packet)
+                pending.append((query_packet, pending_answer))
+
+            for (query_packet, pending_answer) in pending:
+                answer_packet = tunnel.complete_query(pending_answer)
+                self._check_answer_packet(query_packet, answer_packet)
+
+    def test_submit_and_complete_duplicates(self):
+        duplicates = it.islice((question.to_query(i) for (i, question) in enumerate(it.cycle(TEST_QUESTIONS))), TEST_SIZE)
+        self.test_submit_and_complete(duplicates)
 
     def _check_answer_packet(self, query_packet, answer_packet, rcode=NOERROR):
         self.assertTrue(query_packet, 'Query is empty')
@@ -37,44 +60,6 @@ class TestTcpTunnel(TestCase):
         self.assertEqual(request.get_question(), response.get_question(), 'Question does not match')
         self.assertEqual(response.header.rcode, rcode, f'Unexpected RCODE: {RCODE[response.header.rcode]}')
 
-    def test_resolve_query(self, questions=TEST_QUESTIONS):
-        with self.tunnel as tunnel:
-            for (qid, question) in enumerate(questions):
-                query_packet = question.to_query(qid)
-                answer_packet = tunnel.resolve_query(query_packet)
-                self._check_answer_packet(query_packet, answer_packet)
-
-    def test_submit_and_complete(self, questions=TEST_QUESTIONS):
-        pending = []
-
-        with self.tunnel as tunnel:
-            for (qid, question) in enumerate(questions):
-                query_packet = question.to_query(qid)
-                pending_answer = tunnel.submit_query(query_packet)
-                pending.append((query_packet, pending_answer))
-
-            for (query_packet, pending_answer) in pending:
-                answer_packet = tunnel.complete_query(pending_answer)
-                self._check_answer_packet(query_packet, answer_packet)
-
-    def test_submit_and_complete_duplicates(self):
-        duplicates = it.islice(it.cycle(TEST_QUESTIONS), TEST_SIZE)
-        self.test_submit_and_complete(duplicates)
-
-    def test_resolve_queries(self, questions=TEST_QUESTIONS):
-        queries = [question.to_query(qid) for (qid, question) in enumerate(questions)]
-
-        with self.tunnel as tunnel:
-            answers = tunnel.resolve_queries(queries)
-
-        self.assertEqual(len(queries), len(answers), 'Lengths are not the same')
-
-        for (query_packet, answer_packet) in zip(queries, answers):
-            self._check_answer_packet(query_packet, answer_packet)
-
-    def test_resolve_queries_duplicates(self):
-        questions = it.islice(it.cycle(TEST_QUESTIONS), TEST_SIZE)
-        self.test_resolve_queries(questions)
 
 class TestTlsTunnel(TestTcpTunnel):
     def setUp(self):

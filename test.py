@@ -2,12 +2,23 @@ import itertools as it
 import random
 import time
 from unittest import TestCase, main
+import logging
 
 import dns_cache
 from dns_cache.packet import Answer, Packet, Question, NOERROR, RCODE
 from dns_cache.tunnel import TcpTunnel, TlsTunnel
+from dns_cache.resolver import StubResolver
 
+logging.basicConfig(level=logging.INFO)
 random.seed(0xDEADBEEF, 2)
+
+TEST_SERVERS = \
+    (
+        ('1.1.1.1', 853, 'cloudflare-dns.com'),
+        ('1.0.0.1', 853, 'cloudflare-dns.com'),
+        ('2606:4700:4700::1111', 853, 'cloudflare-dns.com'),
+        ('2606:4700:4700::1001', 853, 'cloudflare-dns.com'),
+    )
 
 TEST_DOMAINS = ('google.com', 'spotify.com', 'reddit.com', 'steam.com', 'python.org')
 TEST_QUESTIONS = tuple(Question(domain) for domain in TEST_DOMAINS)
@@ -23,10 +34,10 @@ class TestTcpTunnel(TestCase):
         del self.tunnel
 
     def test_connect_disconnect(self):
-        self.tunnel.connect(10)
+        self.tunnel.open(10)
         self.assertTrue(self.tunnel.connected, 'connected attribute is incorrect')
 
-        self.tunnel.disconnect(10)
+        self.tunnel.close()
         self.assertFalse(self.tunnel.connected, 'connected attribute is incorrect')
 
     def test_resolve_query(self, queries=TEST_QUERIES):
@@ -63,8 +74,34 @@ class TestTcpTunnel(TestCase):
 
 class TestTlsTunnel(TestTcpTunnel):
     def setUp(self):
-        self.tunnel = dns_cache.tunnel.TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com')
+        self.tunnel = TlsTunnel('1.1.1.1', 853, 'cloudflare-dns.com')
 
+
+class TestStubResolver(TestCase):
+    def setUp(self):
+        self.tunnels = tuple((TlsTunnel(*args) for args in TEST_SERVERS))
+        self.resolver = StubResolver(self.tunnels)
+
+    def tearDown(self):
+        del self.resolver
+        for tunnel in self.tunnels:
+            tunnel.close()
+        
+        del self.tunnels
+
+    def test_resolve_question(self, questions=TEST_QUESTIONS):
+        for question in questions:
+            answer = self.resolver.resolve_question(question)
+            self._check_answer(question, answer)
+
+    def test_resolve_questions(self, questions=TEST_QUESTIONS):
+        answers = self.resolver.resolve(questions)
+        self.assertEqual(len(questions), len(answers), 'Answers has unexpected length')
+        for question, answer in zip(questions, answers):
+            self._check_answer(question, answer)
+
+    def _check_answer(self, question, answer, rcode=NOERROR):
+        self.assertEqual(answer.rcode, rcode, f'Unexpected RCODE: {RCODE[answer.rcode]}')
 
 if __name__ == '__main__':
     main()

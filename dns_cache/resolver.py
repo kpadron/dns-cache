@@ -1,5 +1,9 @@
 import asyncio as aio
 import itertools as it
+import struct
+from array import array
+from asyncio import Future, Task
+from functools import cached_property
 from typing import (Awaitable, Collection, Iterable, Iterator, MutableMapping,
                     Optional, Sequence)
 
@@ -28,30 +32,29 @@ class StubResolver:
         """
         self._loop = aio.get_event_loop()
 
-        self._tunnels: Sequence[AbstractTunnel] = list(tunnels)
-        self._counters: Sequence[int] = [0] * len(self._tunnels)
+        self._tunnels: Sequence[AbstractTunnel] = tuple(tunnels)
+        self._counters: Sequence[int] = array('H', [0] * len(self._tunnels))
         self._schedule: Iterator[int] = it.cycle(range(len(self._tunnels)))
 
-        # TODO: Attempt to use futures here maybe with weakref dict as well
-        self._queries: MutableMapping[Question, aio.Future] = {}
+        self._answers: MutableMapping[Question, Task] = {}
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self._tunnels!r})'
 
-    @property
+    @cached_property
     def tunnels(self) -> Sequence[AbstractTunnel]:
         """Returns a read-only view of the tunnels used by the instance."""
-        return utl.SequenceView(self._tunnels)
+        return self._tunnels
 
-    @property
+    @cached_property
     def counters(self) -> Sequence[int]:
         """Returns a read-only view of the query counters for each tunnel used by the instance."""
         return utl.SequenceView(self._counters)
 
-    @property
+    @cached_property
     def questions(self) -> Collection[Question]:
         """Returns a read-only view of the outstanding questions submitted to the instance."""
-        return self._queries.keys()
+        return self._answers.keys()
 
     def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
         """Resolves DNS questions."""
@@ -92,43 +95,57 @@ class StubResolver:
         return utl.AwaitableView(self._submit_question(question))
 
     def _submit_question(self, question: Question) -> Awaitable[Answer]:
+        # Basic input validation
+        if not isinstance(question, Question):
+            raise TypeError(f'Expected a Question instance, not {type(question)}')
+
         # Return the original task if this is a duplicate question
-        task = self._queries.get(question)
-        if task is not None:
-            return task
+        answer_task = self._answers.get(question)
+        if answer_task is not None:
+            return answer_task
 
-        # Select a tunnel to send the query through
-        index = self._select_tunnel()
+        # Schedule the question resolution
+        answer_task = aio.shield(self._aresolve_question(question))
+        self._answers[question] = answer_task
 
-        # Get next query id for this tunnel
-        tunnel = self._tunnels[index]
-        counter = self._counters[index]
-        self._counters[index] = (counter + 1) & 0xffff
+        return answer_task
 
-        # Generate a query packet for this question
-        query_packet = question.to_query(counter)
+    async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
+        """Resolves a question using the via the tunnel streams."""
+        try:
+            # Construct the mutable query packet from the question.
+            query = question.to_query()
 
-        # Create and schedule query resolution task
-        answer_packet = tunnel.submit_query(query_packet)
+            async def query_tunnel(tunnel_index: int) -> Awaitable[bytes]:
+                """Resolves a query via the specified tunnel."""
+                tunnel_query = bytearray(query)
+                tunnel = self._tunnels[tunnel_index]
+                msg_id = self._counters[tunnel_index]
+                try: self._counters[tunnel_index] += 1
+                except OverflowError: self._counters[tunnel_index] = 0
+                struct.pack_into('!H', tunnel_query, 0, msg_id)
+                return await tunnel.submit_query(tunnel_query)
 
-        # Schedule wrapper task
-        # TODO: just return awaitable instead of scheduling
-        task = self._loop.create_task(self._ahandle_answer(question, answer_packet))
+            async def query_tunnels() -> Awaitable[bytes]:
+                """Resolves a query via multiple tunnels until one succeeds."""
+                while True:
+                    tunnel_index = next(self._schedule)
 
-        # Add task to tracking
-        self._queries[question] = task
+                    try:
+                        return await aio.wait_for(query_tunnel(tunnel_index), 0.1)
 
-        return task
+                    except aio.TimeoutError:
+                        pass
 
-    async def _ahandle_answer(self, question: Question, answer_packet: Awaitable[bytes]) -> Awaitable[Answer]:
-        """Wraps a tunnel resolution task and returns a DNS query answer."""
-        try: return pkt.Packet.parse(await answer_packet).get_answer()
-        except Exception: return Answer(pkt.SERVFAIL)
-        finally: del self._queries[question]
+            try:
+                reply = await aio.wait_for(query_tunnels(), 2.0)
+                return pkt.Packet.parse(reply).get_answer()
 
-    def _select_tunnel(self) -> int:
-        """Selects a tunnel index based on a round-robin schedule."""
-        return next(self._schedule)
+            except Exception:
+                return Answer(pkt.SERVFAIL)
+
+        finally:
+            del self._answers[question]
 
 
 class CachedResolver(StubResolver):

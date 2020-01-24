@@ -1,15 +1,12 @@
-import asyncio as aio
 import itertools as it
-import struct
 from collections import OrderedDict
 from collections.abc import Awaitable as _Awaitable
 from collections.abc import Collection as _Collection
 from collections.abc import Container as _Container
 from collections.abc import MutableMapping as _MutableMapping
 from collections.abc import Sequence as _Sequence
-from typing import (Any, Awaitable, Collection, Container, Hashable, Iterable,
-                    Iterator, Mapping, MutableMapping, Optional, Sequence,
-                    Tuple, Union)
+from typing import (Any, Awaitable, Container, Hashable, Iterable, Iterator,
+                    Mapping, Optional, Tuple, Union)
 
 __all__ = \
 [
@@ -19,11 +16,6 @@ __all__ = \
     'AwaitableView',
     'Cache',
     'LruCache',
-    'StateEvent',
-    'get_short',
-    'set_short',
-    'cancel_all',
-    'wait_first',
 ]
 
 
@@ -240,107 +232,3 @@ class LruCache(Cache):
         """Returns an iterator over the n most-recently-used items."""
         n = 0 if n <= 0 else min(n, len(self))
         return it.islice(iter(self._mapping.items()), n)
-
-
-class StateEvent:
-    """
-    An async event that can be waited-on for both state changes.
-
-    Extends asyncio.Event to provide:
-        - wait_true
-        - wait_false
-    """
-    def __init__(self) -> None:
-        """Initialize a StateEvent instance."""
-        self._event = aio.Event()
-        self._ievent = aio.Event()
-        self._ievent.set()
-
-    def is_set(self) -> bool:
-        """Returns the value of the internal flag."""
-        return self._event.is_set()
-
-    def set(self) -> None:
-        """Sets the internal flag to true."""
-        self._event.set()
-        self._ievent.clear()
-
-    def clear(self) -> None:
-        """Sets the internal flag to false."""
-        self._event.clear()
-        self._ievent.set()
-
-    def wait_true(self) -> Awaitable[bool]:
-        """Waits until the internal flag is true."""
-        return self._event.wait()
-
-    def wait_false(self) -> Awaitable[bool]:
-        """Waits until the internal flag is false."""
-        return self._ievent.wait()
-
-
-def get_short(data: bytes, offset: int = 0) -> int:
-    """
-    Returns a short (16-bit unsigned integer) by reading 2-bytes of data.
-
-    Note: The short is expected to be stored in NBO when reading data.
-
-    Args:
-        data: The bytes-like object to read (must be at least 2-bytes long starting at offset).
-        offset: The byte offset to start the 2-byte read.
-
-    Raises:
-        TypeError: When given unsupported input types.
-        ValueError: When given correct input types with bad values.
-    """
-    try: 
-        return struct.unpack('!H', memoryview(data)[offset:offset+2])[0]
-    except struct.error:
-        raise ValueError('data - must be at least 2-bytes long starting at offset')
-
-def set_short(data: bytearray, value: int, offset: int = 0) -> None:
-    """
-    Writes a short (16-bit unsigned integer) by writing 2-bytes at offset in data.
-
-    Note: The short is stored in NBO when writing data.
-
-    Args:
-        data: The mutable bytes-like object to write to (must be at least 2-bytes long starting at offset).
-        value: The short integer value to write to data.
-        offset: The byte offset to start the 2-byte write.
-
-    Raises:
-        TypeError: When given unsupported input types.
-        ValueError: When given correct input types with bad values.
-    """
-    memoryview(data)[offset:offset+2] = struct.pack('!H', int(value) & 0xffff)
-
-def cancel_all(futures: Iterable[aio.Future]) -> Sequence[aio.Future]:
-    """
-    Cancels all futures in a iterable of futures.
-
-    Returns:
-        A sequence containing the futures that were cancelled.
-    """
-    return [future for future in futures if future.cancel()]
-
-async def wait_first(futures: Iterable[aio.Future], cancel_pending: bool = True) -> Awaitable[aio.Future]:
-    """
-    Waits for the first future in futures to complete and returns it.
-
-    Args:
-        futures: The iterable of futures to wait on.
-        cancel_pending: Whether to cancel the pending futures after waiting.
-
-    Returns:
-        The first future to complete.
-    """
-    # Wait for the first future to complete
-    (done, pending) = await aio.wait(futures, return_when=aio.FIRST_COMPLETED)
-
-    # Cancel the unfinished futures
-    if cancel_pending:
-        cancel_all(pending)
-
-    # Return the first future that finished
-    return done.pop()

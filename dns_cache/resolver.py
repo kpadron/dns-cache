@@ -1,6 +1,6 @@
 import asyncio as aio
 import itertools as it
-import struct
+from struct import Struct
 from array import array
 from asyncio import Future, Task
 from functools import cached_property
@@ -41,17 +41,17 @@ class StubResolver:
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self._tunnels!r})'
 
-    @cached_property
+    @property
     def tunnels(self) -> Sequence[AbstractTunnel]:
         """Returns a read-only view of the tunnels used by the instance."""
         return self._tunnels
 
-    @cached_property
+    @property
     def counters(self) -> Sequence[int]:
         """Returns a read-only view of the query counters for each tunnel used by the instance."""
         return utl.SequenceView(self._counters)
 
-    @cached_property
+    @property
     def questions(self) -> Collection[Question]:
         """Returns a read-only view of the outstanding questions submitted to the instance."""
         return self._answers.keys()
@@ -80,6 +80,7 @@ class StubResolver:
 
         Returns:
             A sequence of awaitable objects that represent eventual answers to the questions.
+
             When awaited the objects yield the answers.
         """
         return [self.submit_question(question) for question in questions]
@@ -90,6 +91,7 @@ class StubResolver:
 
         Returns:
             A awaitable object that represents the eventual answer to the question.
+
             When awaited the object yields the answer.
         """
         return utl.AwaitableView(self._submit_question(question))
@@ -110,38 +112,60 @@ class StubResolver:
 
         return answer_task
 
+    __packer = Struct('!H').pack
+
     async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
         """Resolves a question using the via the tunnel streams."""
         try:
-            # Construct the mutable query packet from the question.
-            query = question.to_query()
+            query_tail = question.to_query(0)[2:]
+            packer = self.__packer
 
             async def query_tunnel(tunnel_index: int) -> Awaitable[bytes]:
                 """Resolves a query via the specified tunnel."""
-                tunnel_query = bytearray(query)
-                tunnel = self._tunnels[tunnel_index]
                 msg_id = self._counters[tunnel_index]
                 try: self._counters[tunnel_index] += 1
                 except OverflowError: self._counters[tunnel_index] = 0
-                struct.pack_into('!H', tunnel_query, 0, msg_id)
+
+                tunnel_query = packer(msg_id) + query_tail
+                tunnel = self._tunnels[tunnel_index]
                 return await tunnel.submit_query(tunnel_query)
 
             async def query_tunnels() -> Awaitable[bytes]:
-                """Resolves a query via multiple tunnels until one succeeds."""
+                """
+                Resolves a query via multiple tunnels until one succeeds.
+
+                Holds a staggered race until a tunnel query succeeds.
+                """
+                # Wait 100 ms before starting the next query attempt
+                STAGGER_TIMEOUT = 0.1
+
+                # Initialize the set of competing tasks
+                running = set()
+
                 while True:
-                    tunnel_index = next(self._schedule)
+                    # Schedule a new task and add it to the running set
+                    running.add(self._loop.create_task(query_tunnel(next(self._schedule))))
 
-                    try:
-                        return await aio.wait_for(query_tunnel(tunnel_index), 0.1)
+                    # Wait for a competitor to finish
+                    (finished, _) = await aio.wait(running, timeout=STAGGER_TIMEOUT, return_when=aio.FIRST_COMPLETED)
 
-                    except aio.TimeoutError:
-                        pass
+                    # Return the winners result and cancel the losers
+                    if finished:
+                        winner = finished.pop()
+
+                        for loser in running:
+                            loser.cancel()
+
+                        return winner.result()
+
+            # Wait 2000 ms per query resolution
+            QUERY_TIME = 2.0
 
             try:
-                reply = await aio.wait_for(query_tunnels(), 2.0)
+                reply = await aio.wait_for(query_tunnels(), QUERY_TIME)
                 return pkt.Packet.parse(reply).get_answer()
 
-            except Exception:
+            except (aio.TimeoutError, ConnectionError):
                 return Answer(pkt.SERVFAIL)
 
         finally:
@@ -192,6 +216,7 @@ class CachedResolver(StubResolver):
         # Check the cache for the answer first
         answer = self._cache.get_entry(question)
         if answer is not None and not answer.expired:
+            answer.stamp()
             future = self._loop.create_future()
             future.set_result(answer)
             return utl.AwaitableView(future)
@@ -199,10 +224,11 @@ class CachedResolver(StubResolver):
         # Schedule the resolution for the question
         return super().submit_question(question)
 
-    async def _ahandle_answer(self, question: pkt.Question, task: aio.Task) -> pkt.Answer:
-        answer = await super()._ahandle_answer(question, task)
+    async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
+        answer = await super()._aresolve_question(question)
+
         if answer.rcode == pkt.NOERROR:
-            self._cache.add(question, answer)
+            self._cache.set_entry(question, answer)
 
         return answer
 

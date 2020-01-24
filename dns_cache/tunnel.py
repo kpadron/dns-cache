@@ -1,16 +1,16 @@
 import asyncio as aio
 import logging
 import ssl
-import struct
 from abc import ABCMeta, abstractmethod
 from asyncio import Future, Protocol, Transport
-from functools import cached_property
+from struct import Struct
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSequence, MutableSet, Optional, Tuple)
 
 from . import utility as utl
 
 logger = logging.getLogger(__name__)
+
 
 __all__ = \
 [
@@ -21,9 +21,9 @@ __all__ = \
 
 
 # Functions used to peek and manipulate DNS messages
-_peek_packet = struct.Struct('!H').unpack_from
-_prefix_packet = struct.Struct('!H').pack
-_peek_prefixed_packet = struct.Struct('!HH').unpack_from
+_peek_packet = Struct('!H').unpack_from
+_prefix_packet = Struct('!H').pack
+_peek_prefixed_packet = Struct('!HH').unpack_from
 
 
 class AbstractTunnel(metaclass=ABCMeta):
@@ -241,11 +241,11 @@ class Stream(Protocol):
         self._peer = transport.get_extra_info('peername')
         self._connected = True
 
-        logger.info(f'<{self.__class__.__name__} {id(self)} {self._peer}> Connection established')
+        logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection established')
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         """Deinitializes the stream connection."""
-        logger.info(f'<{self.__class__.__name__} {id(self)} {self._peer}> Connection lost')
+        logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection lost')
 
         self._connected = False
 
@@ -263,13 +263,13 @@ class Stream(Protocol):
 
     def pause_writing(self) -> None:
         """Pauses writing to the stream connection."""
-        logger.debug(f'<{self.__class__.__name__} {id(self)} {self._peer}> Writing paused')
+        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Writing paused')
 
         self._paused = True
 
     def resume_writing(self) -> None:
         """Resumes writing to the stream connection."""
-        logger.debug(f'<{self.__class__.__name__} {id(self)} {self._peer}> Writing resumed')
+        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Writing resumed')
 
         self._paused = False
 
@@ -288,7 +288,7 @@ class Stream(Protocol):
         buffer = self._buffer
         buffer.extend(data)
 
-        logger.debug(f'<{self.__class__.__name__} {id(self)} {self._peer}> Data received - len(data)={len(data)}, len(buffer)={len(buffer)}')
+        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Data received - len(data)={len(data)}, len(buffer)={len(buffer)}')
 
         # Process DNS messages in the buffer
         while True:
@@ -315,7 +315,7 @@ class Stream(Protocol):
             message = buffer[:msg_size]
             del buffer[:msg_size]
 
-            logger.debug(f'<{self.__class__.__name__} {id(self)} {self._peer}> Message received - msg_size={msg_size}, msg_id={msg_id}')
+            logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Message received - msg_size={msg_size}, msg_id={msg_id}')
 
             # Set the result for the reply future
             reply_future = self._replies.get(msg_id)
@@ -324,13 +324,13 @@ class Stream(Protocol):
 
     def eof_received(self) -> None:
         """Handles receiving EOF on the stream connection."""
-        logger.info(f'<{self.__class__.__name__} {id(self)} {self._peer}> EOF received - buffer={self._buffer!r}')
+        logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> EOF received - buffer={self._buffer!r}')
         self._transport.abort()
 
     def abort(self) -> None:
         """Aborts the stream connection."""
         if self._connected:
-            logger.info(f'<{self.__class__.__name__} {id(self)} {self._peer}> Aborting connection')
+            logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Aborting connection')
             self._transport.abort()
 
     async def aresolve(self, prefixed_query: bytes) -> Awaitable[bytes]:
@@ -362,10 +362,10 @@ class Stream(Protocol):
         self._replies[msg_id] = reply_future
 
         try:
-            # Async checkpoint (can be cancelled or disconnected here)
+            # Async checkpoint (check for cancellation or broken stream)
             await aio.sleep(0)
 
-            # Ensure the transport
+            # Ensure the transport stream is connected
             if not self._connected:
                 raise ConnectionResetError('Stream connection was broken')
 
@@ -429,7 +429,7 @@ class TcpTunnel(AbstractTunnel):
     def connected(self) -> bool:
         return self._stream is not None and self._stream.connected
 
-    @cached_property
+    @property
     def queries(self) -> Collection[int]:
         return utl.CollectionView(self._queries)
 
@@ -456,37 +456,37 @@ class TcpTunnel(AbstractTunnel):
         # Start tracking this query
         self._queries.add(msg_id)
 
+        async def aresolution() -> Awaitable[bytes]:
+            """Asynchronous query resolution process."""
+            try:
+                # Limit maximum outstanding queries
+                async with self._limiter:
+                    # Attempt to resolve the query
+                    while True:
+                        try:
+                            # Ensure that the tunnel is connected
+                            if not self.connected:
+                                await self.aopen()
+
+                            # Resolve the query via the stream tunnel
+                            stream = self._stream
+                            prefixed_reply = await stream.aresolve(prefixed_query)
+
+                            # Return the unprefixed reply packet
+                            return prefixed_reply[2:]
+
+                        except ConnectionRefusedError:
+                            raise
+
+                        except ConnectionError:
+                            if stream is self._stream:
+                                self._stream = None
+
+            finally:
+                self._queries.discard(msg_id)
+
         # Schedule the resolution of this query
-        return self._loop.create_task(self._aresolution(prefixed_query, msg_id))
-
-    async def _aresolution(self, prefixed_query: bytes, msg_id: int) -> Awaitable[bytes]:
-        """Asynchronous query resolution process."""
-        try:
-            # Limit maximum outstanding queries
-            async with self._limiter:
-                # Attempt to resolve the query
-                while True:
-                    try:
-                        # Ensure that the tunnel is connected
-                        if not self.connected:
-                            await self.aopen()
-
-                        # Resolve the query via the stream tunnel
-                        stream = self._stream
-                        prefixed_reply = await stream.aresolve(prefixed_query)
-
-                        # Return the unprefixed reply packet
-                        return prefixed_reply[2:]
-
-                    except ConnectionRefusedError:
-                        raise
-
-                    except ConnectionError:
-                        if stream is self._stream:
-                            self._stream = None
-
-        finally:
-            self._queries.discard(msg_id)
+        return self._loop.create_task(aresolution())
 
     async def aopen(self, **kwargs) -> Awaitable[None]:
         async with self._clock:

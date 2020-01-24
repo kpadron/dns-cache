@@ -1,15 +1,16 @@
 import itertools as it
+import logging
 import random
 import time
 from unittest import TestCase, main
-import logging
 
 import dns_cache
-from dns_cache.packet import Answer, Packet, Question, NOERROR, RCODE
+from dns_cache.packet import NOERROR, RCODE, Answer, Packet, Question
+from dns_cache.resolver import CachedResolver, StubResolver
 from dns_cache.tunnel import TcpTunnel, TlsTunnel
-from dns_cache.resolver import StubResolver
+from dns_cache.utility import LruCache
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 random.seed(0xDEADBEEF, 2)
 
 TEST_SERVERS = \
@@ -23,7 +24,7 @@ TEST_SERVERS = \
 TEST_DOMAINS = ('google.com', 'spotify.com', 'reddit.com', 'steam.com', 'python.org')
 TEST_QUESTIONS = tuple(Question(domain) for domain in TEST_DOMAINS)
 TEST_QUERIES = tuple(question.to_query(i) for (i, question) in enumerate(TEST_QUESTIONS))
-TEST_SIZE = 1000
+TEST_SIZE = 10000
 
 
 class TestTcpTunnel(TestCase):
@@ -93,6 +94,7 @@ class TestStubResolver(TestCase):
         for question in questions:
             answer = self.resolver.resolve_question(question)
             self._check_answer(question, answer)
+            print(answer)
 
     def test_resolve_questions(self, questions=TEST_QUESTIONS):
         answers = self.resolver.resolve(questions)
@@ -100,8 +102,22 @@ class TestStubResolver(TestCase):
         for question, answer in zip(questions, answers):
             self._check_answer(question, answer)
 
+    def test_resolve_questions_duplicates(self):
+        duplicates = tuple(it.islice(it.cycle(TEST_QUESTIONS), TEST_SIZE))
+        self.test_resolve_questions(duplicates)
+
     def _check_answer(self, question, answer, rcode=NOERROR):
         self.assertEqual(answer.rcode, rcode, f'Unexpected RCODE: {RCODE[answer.rcode]}')
+
+class TestCachedResolver(TestStubResolver):
+    def setUp(self):
+        super().setUp()
+        self.cache = LruCache(1000)
+        self.resolver = CachedResolver(self.tunnels, self.cache)
+
+    def tearDown(self):
+        super().tearDown()
+        del self.cache
 
 if __name__ == '__main__':
     main()

@@ -24,7 +24,7 @@ TEST_SERVERS = \
 TEST_DOMAINS = ('google.com', 'spotify.com', 'reddit.com', 'steam.com', 'python.org')
 TEST_QUESTIONS = tuple(Question(domain) for domain in TEST_DOMAINS)
 TEST_QUERIES = tuple(question.to_query(i) for (i, question) in enumerate(TEST_QUESTIONS))
-TEST_SIZE = 10000
+TEST_SIZE = 50000
 
 
 class TestTcpTunnel(TestCase):

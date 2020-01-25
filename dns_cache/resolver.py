@@ -1,9 +1,10 @@
 import asyncio as aio
 import itertools as it
-from struct import Struct
+from abc import ABCMeta, abstractmethod
 from array import array
 from asyncio import Future, Task
 from functools import cached_property
+from struct import Struct
 from typing import (Awaitable, Collection, Iterable, Iterator, MutableMapping,
                     Optional, Sequence)
 
@@ -15,46 +16,25 @@ from .utility import Cache
 
 __all__ = \
 [
+    'AbstractResolver',
     'StubResolver',
     'CachedResolver',
     'AutoResolver',
 ]
 
 
-class StubResolver:
-    """A DNS stub resolver that forwards requests to upstream recursive servers."""
-    def __init__(self, tunnels: Iterable[AbstractTunnel]) -> None:
-        """
-        Initializes a StubResolver instance.
-
-        Args:
-            tunnels: A non-empty iterable of AbstractTunnel instances.
-        """
+class AbstractResolver(metaclass=ABCMeta):
+    """A DNS resolver abstract base class."""
+    @abstractmethod
+    def __init__(self) -> None:
+        """Initializes a AbstractResolver instance."""
         self._loop = aio.get_event_loop()
 
-        self._tunnels: Sequence[AbstractTunnel] = tuple(tunnels)
-        self._counters: Sequence[int] = array('H', [0] * len(self._tunnels))
-        self._schedule: Iterator[int] = it.cycle(range(len(self._tunnels)))
-
-        self._answers: MutableMapping[Question, Task] = {}
-
-    def __repr__(self) -> str:
-        return f'{self.__class__.__name__}({self._tunnels!r})'
-
     @property
-    def tunnels(self) -> Sequence[AbstractTunnel]:
-        """Returns a read-only view of the tunnels used by the instance."""
-        return self._tunnels
-
-    @property
-    def counters(self) -> Sequence[int]:
-        """Returns a read-only view of the query counters for each tunnel used by the instance."""
-        return utl.SequenceView(self._counters)
-
-    @property
+    @abstractmethod
     def questions(self) -> Collection[Question]:
         """Returns a read-only view of the outstanding questions submitted to the instance."""
-        return self._answers.keys()
+        raise NotImplementedError
 
     def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
         """Resolves DNS questions."""
@@ -95,6 +75,50 @@ class StubResolver:
             When awaited the object yields the answer.
         """
         return utl.AwaitableView(self._submit_question(question))
+
+    @abstractmethod
+    def _submit_question(self, question: Question) -> Awaitable[Answer]:
+        """Internal processing for submitting a DNS question."""
+        raise NotImplementedError
+
+
+class StubResolver(AbstractResolver):
+    """
+    A DNS stub resolver that forwards requests to upstream recursive servers.
+
+    Uses AbstractTunnel instances to resolve queries.
+    """
+    def __init__(self, tunnels: Iterable[AbstractTunnel]) -> None:
+        """
+        Initializes a StubResolver instance.
+
+        Args:
+            tunnels: A non-empty iterable of AbstractTunnel instances.
+        """
+        super().__init__()
+
+        self._tunnels: Sequence[AbstractTunnel] = tuple(tunnels)
+        self._counters: Sequence[int] = array('H', [0] * len(self._tunnels))
+        self._schedule: Iterator[int] = it.cycle(range(len(self._tunnels)))
+
+        self._answers: MutableMapping[Question, Task] = {}
+
+    def __repr__(self) -> str:
+        return f'{self.__class__.__name__}({self._tunnels!r})'
+
+    @property
+    def tunnels(self) -> Sequence[AbstractTunnel]:
+        """Returns a read-only view of the tunnels used by the instance."""
+        return self._tunnels
+
+    @property
+    def counters(self) -> Sequence[int]:
+        """Returns a read-only view of the query counters for each tunnel used by the instance."""
+        return utl.SequenceView(self._counters)
+
+    @property
+    def questions(self) -> Collection[Question]:
+        return self._answers.keys()
 
     def _submit_question(self, question: Question) -> Awaitable[Answer]:
         # Basic input validation
@@ -173,7 +197,10 @@ class StubResolver:
 
 
 class CachedResolver(StubResolver):
-    """A DNS stub resolver that caches answers.
+    """
+    A DNS stub resolver that caches answers.
+
+    Uses a Cache instance to store successful query results for later reference.
     """
     def __init__(self, tunnels: Iterable[AbstractTunnel], cache: Optional[Cache] = None) -> None:
         """Initialize a CachedResolver instance.
@@ -184,45 +211,19 @@ class CachedResolver(StubResolver):
         """
         super().__init__(tunnels)
 
-        self._cache: MutableMapping[Question, Answer] = cache or utl.LruCache(10000)
+        self._cache: MutableMapping[Question, Answer] = cache or Cache(10000)
 
-    def resolve(self, questions: Iterable[Question]) -> Sequence[Answer]:
-        # Check the cache for the answers first
-        answers, indices = [], []
-        for (index, question) in enumerate(questions):
-            answer = self._cache.get(question)
-            if answer is not None and not answer.expired:
-                answers.append(answer)
-            else:
-                answers.append(self.submit_question(question))
-                indices.append(index)
-
-        # Schedule and wait for resolution of the questions
-        for index in indices:
-            answers[index] = self._loop.run_until_complete(answers[index])
-
-        return answers
-
-    def resolve_question(self, question: pkt.Question) -> pkt.Answer:
-        # Check the cache for the answer first
-        answer = self._cache.get(question)
-        if answer is not None and not answer.expired:
-            return answer
-
-        # Schedule the resolution for the question
-        return super().resolve_question(question)
-
-    def submit_question(self, question: Question) -> Awaitable[Answer]:
+    def _submit_question(self, question: Question) -> Awaitable[Answer]:
         # Check the cache for the answer first
         answer = self._cache.get_entry(question)
         if answer is not None and not answer.expired:
             answer.stamp()
             future = self._loop.create_future()
             future.set_result(answer)
-            return utl.AwaitableView(future)
+            return future
 
         # Schedule the resolution for the question
-        return super().submit_question(question)
+        return super()._submit_question(question)
 
     async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
         answer = await super()._aresolve_question(question)
@@ -234,8 +235,7 @@ class CachedResolver(StubResolver):
 
 
 class AutoResolver(CachedResolver):
-    """A DNS stub resolver that caches answers and auto refreshes cache entries.
-    """
+    """A DNS stub resolver that caches answers and auto refreshes cache entries."""
     def __init__(self, tunnels: Iterable[AbstractTunnel], **kwargs) -> None:
         """Initialize a AutoResolver instance.
 
@@ -247,3 +247,5 @@ class AutoResolver(CachedResolver):
 
         self.refresh_period = kwargs.get('refresh_period', 30.0)
         self.refresh_size = kwargs.get('refresh_size', 1000)
+
+        raise NotImplementedError

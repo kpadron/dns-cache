@@ -84,13 +84,15 @@ class Answer:
         """Adjusts the ttl fields in instance records based on the current time."""
         now = time.monotonic()
         diff = int(now - self._time)
-        self._time = now
 
-        for record in self.records:
-            record.ttl = max(record.ttl - diff, 0)
+        if diff > 0:
+            self._time = now
 
-        if self._min_ttl is not None:
-            self._min_ttl = max(self._min_ttl - diff, 0)
+            for record in self.records:
+                record.ttl = max(record.ttl - diff, 0)
+
+            if self._min_ttl is not None:
+                self._min_ttl = max(self._min_ttl - diff, 0)
 
     @property
     def rcode(self) -> int:
@@ -126,14 +128,9 @@ class Answer:
         return self._min_ttl
 
     @property
-    def age(self) -> float:
-        """Returns the age of the instance."""
-        return time.monotonic() - self._time
-
-    @property
     def expired(self) -> bool:
         """Returns whether the instance has expired or not."""
-        return self.age > self.ttl
+        return time.monotonic() > self._time + self.ttl
 
     @staticmethod
     def _strip_records(records: Iterable[RR]) -> Iterator[RR]:
@@ -181,5 +178,6 @@ class Packet(DNSRecord):
         """Marks the packet as a query response and sets the rcode."""
         self.header.rcode = rcode
         self.header.qr = 1
-        self.header.aa = 1
+        self.header.aa = 0
+        self.header.ad = 0
         self.header.ra = 1

@@ -2,28 +2,23 @@ import asyncio as aio
 import logging
 import ssl
 from abc import ABCMeta, abstractmethod
-from asyncio import Future, Protocol, Transport
+from asyncio import Future, Transport
 from struct import Struct
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
-                    MutableSequence, MutableSet, Optional, Tuple)
+                    MutableSet, Optional, Tuple)
 
 from . import utility as utl
-
-logger = logging.getLogger(__name__)
-
+from .protocol import AbstractStreamProtocol
 
 __all__ = \
-[
-    'AbstractTunnel',
-    'TcpTunnel',
-    'TlsTunnel',
-]
+    (
+        'AbstractTunnel',
+        'TcpTunnel',
+        'TlsTunnel',
+    )
 
 
-# Functions used to peek and manipulate DNS messages
-_peek_packet = Struct('!H').unpack_from
-_prefix_packet = Struct('!H').pack
-_peek_prefixed_packet = Struct('!HH').unpack_from
+logger = logging.getLogger(__name__)
 
 
 class AbstractTunnel(metaclass=ABCMeta):
@@ -197,38 +192,21 @@ class AbstractTunnel(metaclass=ABCMeta):
         raise NotImplementedError
 
 
-class Stream(Protocol):
+class Stream(AbstractStreamProtocol):
     """DNS over stream-based transport protocol."""
+
     __slots__ = \
         (
-            '_loop',
-            '_connected',
-            '_paused',
-            '_transport',
             '_peer',
-            '_buffer',
-            '_drainers',
             '_replies',
         )
 
     def __init__(self) -> None:
         """Initializes a Stream protocol instance."""
-        self._loop = aio.get_running_loop()
+        super().__init__()
 
-        self._connected = False
-        self._paused = False
-
-        self._transport: Optional[Transport] = None
-        self._peer = None
-        self._buffer = bytearray()
-
-        self._drainers: MutableSequence[Future] = []
+        self._peer: Optional[Tuple[str, int]] = None
         self._replies: MutableMapping[int, Future] = {}
-
-    @property
-    def connected(self) -> bool:
-        """Returns true if and only if connected to the peer."""
-        return self._connected
 
     @property
     def peer(self) -> Optional[Tuple[str, int]]:
@@ -237,93 +215,27 @@ class Stream(Protocol):
 
     def connection_made(self, transport: Transport) -> None:
         """Initializes the stream connection."""
-        self._transport = transport
+        super().connection_made(transport)
         self._peer = transport.get_extra_info('peername')
-        self._connected = True
 
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection established')
+
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         """Deinitializes the stream connection."""
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection lost')
 
-        self._connected = False
-
         # Ensure the tranport is closed
         self._transport.abort()
-        self._transport = None
+
+        super().connection_lost(exc)
 
         # Finalize reply futures
         for reply_future in self._replies.values():
             if not reply_future.done():
                 reply_future.set_result(None)
 
-        # Finalize drain futures
-        self.resume_writing()
-
-    def pause_writing(self) -> None:
-        """Pauses writing to the stream connection."""
-        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Writing paused')
-
-        self._paused = True
-
-    def resume_writing(self) -> None:
-        """Resumes writing to the stream connection."""
-        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Writing resumed')
-
-        self._paused = False
-
-        for drainer in self._drainers:
-            if not drainer.done():
-                drainer.set_result(None)
-
-        self._drainers.clear()
-
-    def data_received(self, data: bytes) -> None:
-        """Receives data from the stream connection."""
-        # Minimum size of a DNS message with a length prefix
-        MIN_PREFIXED_SIZE = 14
-
-        # Add new data to the buffer
-        buffer = self._buffer
-        buffer.extend(data)
-
-        logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Data received - len(data)={len(data)}, len(buffer)={len(buffer)}')
-
-        # Process DNS messages in the buffer
-        while True:
-            # Ensure the buffer holds at least a minimum DNS message
-            buffer_size = len(buffer)
-            if buffer_size < MIN_PREFIXED_SIZE:
-                return
-
-            # Peek the DNS message fields
-            (msg_size, msg_id) = _peek_prefixed_packet(buffer)
-
-            # Verify that the reported message size is sane
-            msg_size += 2
-            if msg_size < MIN_PREFIXED_SIZE:
-                # Corrupted/Malicious DNS message stream
-                self._transport.abort()
-                return
-
-            # Ensure we have the a full DNS message
-            if buffer_size < msg_size:
-                return
-
-            # Remove the message from the buffer
-            message = buffer[:msg_size]
-            del buffer[:msg_size]
-
-            logger.debug(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Message received - msg_size={msg_size}, msg_id={msg_id}')
-
-            # Set the result for the reply future
-            reply_future = self._replies.get(msg_id)
-            if reply_future is not None and not reply_future.done():
-                reply_future.set_result(message)
-
     def eof_received(self) -> None:
-        """Handles receiving EOF on the stream connection."""
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> EOF received - buffer={self._buffer!r}')
         self._transport.abort()
 
@@ -333,17 +245,17 @@ class Stream(Protocol):
             logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Aborting connection')
             self._transport.abort()
 
-    async def aresolve(self, prefixed_query: bytes) -> Awaitable[bytes]:
+    async def aresolve(self, query: bytes) -> Awaitable[bytes]:
         """
         Resolve a DNS query via the stream connection peer.
 
         This coroutine can be safely cancelled.
 
         Args:
-            prefixed_query: The length-prefixed DNS query packet to resolve.
+            query: The DNS query packet to resolve.
 
         Returns:
-            The length-prefixed DNS reply packet.
+            The DNS reply packet.
 
         Raises:
             ConnectionError: Failed to resolve query due to broken stream connection.
@@ -353,7 +265,7 @@ class Stream(Protocol):
             raise ConnectionError('Stream is not connected')
 
         # Extract query message id
-        (_, msg_id) = _peek_prefixed_packet(prefixed_query)
+        msg_id: int = self._peek(query)
 
         assert msg_id not in self._replies
 
@@ -370,37 +282,35 @@ class Stream(Protocol):
                 raise ConnectionResetError('Stream connection was broken')
 
             # Write the query to the transport stream
-            self._transport.write(prefixed_query)
+            self._write_message(query)
             await self._drain_writes()
 
             # Wait for the reply to be received
-            prefixed_reply = await reply_future
-            if prefixed_reply is None:
+            reply = await reply_future
+            if reply is None:
                 raise ConnectionResetError('Stream connection was broken')
 
             # Return reply packet
-            return prefixed_reply
+            return reply
 
         finally:
             del self._replies[msg_id]
 
-    async def _drain_writes(self) -> Awaitable[None]:
-        """Waits for buffered data to be flushed to the stream connection."""
-        if not self._paused:
-            return
-
-        assert self._connected
-
-        drainer = self._loop.create_future()
-        self._drainers.append(drainer)
-
-        await drainer
+    def _message_received(self, message: bytes):
+        # Set the result for the reply future
+        reply_future = self._replies.get(self._peek(message))
+        if reply_future is not None and not reply_future.done():
+            reply_future.set_result(message)
 
 
 class TcpTunnel(AbstractTunnel):
     """DNS tunnel over TCP transport class."""
+
     # Maximum number of outstanding queries before new submissions will block
     MAX_QUERIES: int = 10000
+
+    _peeker = Struct('!H').unpack_from
+    _peek = lambda s, p: s._peeker(p)[0]
 
     def __init__(self, host: str, port: int) -> None:
         """
@@ -434,28 +344,6 @@ class TcpTunnel(AbstractTunnel):
         return utl.CollectionView(self._queries)
 
     def submit_query(self, query: bytes) -> Awaitable[bytes]:
-        # Valid sizes of a DNS query without a length prefix
-        MIN_QUERY_SIZE = 12
-        MAX_QUERY_SIZE = 65535
-
-        # Ensure that the query packet size is sane
-        query_size = len(query)
-        if query_size < MIN_QUERY_SIZE:
-            raise ValueError('Malformed query packet (too small)')
-        elif query_size > MAX_QUERY_SIZE:
-            raise ValueError('Malformed query packet (too big)')
-
-        # Forbid duplicate query ids
-        msg_id: int = _peek_packet(query)[0]
-        if msg_id in self._queries:
-            raise ValueError(f'Already processing message id 0x{msg_id:04x} ({msg_id})')
-
-        # Construct the length-prefixed query packet
-        prefixed_query = _prefix_packet(query_size) + query
-
-        # Start tracking this query
-        self._queries.add(msg_id)
-
         async def aresolution() -> Awaitable[bytes]:
             """Asynchronous query resolution process."""
             try:
@@ -470,10 +358,7 @@ class TcpTunnel(AbstractTunnel):
 
                             # Resolve the query via the stream tunnel
                             stream = self._stream
-                            prefixed_reply = await stream.aresolve(prefixed_query)
-
-                            # Return the unprefixed reply packet
-                            return prefixed_reply[2:]
+                            return await stream.aresolve(query)
 
                         except ConnectionRefusedError:
                             raise
@@ -484,6 +369,25 @@ class TcpTunnel(AbstractTunnel):
 
             finally:
                 self._queries.discard(msg_id)
+
+        # Valid sizes of a DNS query without a length prefix
+        MIN_QUERY_SIZE = 12
+        MAX_QUERY_SIZE = 65535
+
+        # Ensure that the query packet size is sane
+        query_size = len(query)
+        if query_size < MIN_QUERY_SIZE:
+            raise ValueError('Malformed query packet (too small)')
+        elif query_size > MAX_QUERY_SIZE:
+            raise ValueError('Malformed query packet (too big)')
+
+        # Forbid duplicate query ids
+        msg_id: int = self._peek(query)
+        if msg_id in self._queries:
+            raise ValueError(f'Already processing message id 0x{msg_id:04x} ({msg_id})')
+
+        # Start tracking this query
+        self._queries.add(msg_id)
 
         # Schedule the resolution of this query
         return self._loop.create_task(aresolution())

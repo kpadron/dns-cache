@@ -74,6 +74,10 @@ class AbstractResolver(metaclass=ABCMeta):
 
             When awaited the object yields the answer.
         """
+        # Basic input validation
+        if not isinstance(question, Question):
+            raise TypeError(f'Expected a Question instance, not {type(question)}')
+
         return utl.AwaitableView(self._submit_question(question))
 
     @abstractmethod
@@ -121,10 +125,6 @@ class StubResolver(AbstractResolver):
         return self._answers.keys()
 
     def _submit_question(self, question: Question) -> Awaitable[Answer]:
-        # Basic input validation
-        if not isinstance(question, Question):
-            raise TypeError(f'Expected a Question instance, not {type(question)}')
-
         # Return the original task if this is a duplicate question
         answer_task = self._answers.get(question)
         if answer_task is not None:

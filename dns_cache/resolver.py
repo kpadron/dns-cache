@@ -12,7 +12,7 @@ from . import packet as pkt
 from . import utility as utl
 from .packet import Answer, Question
 from .tunnel import AbstractTunnel
-from .utility import Cache
+from .cache import AbstractCache, LruCache
 
 __all__ = \
 [
@@ -202,16 +202,16 @@ class CachedResolver(StubResolver):
 
     Uses a Cache instance to store successful query results for later reference.
     """
-    def __init__(self, tunnels: Iterable[AbstractTunnel], cache: Optional[Cache] = None) -> None:
+    def __init__(self, tunnels: Iterable[AbstractTunnel], cache: Optional[AbstractCache] = None) -> None:
         """Initialize a CachedResolver instance.
 
         Args:
             tunnels: A non-empty iterable of AbstractTunnel instances.
-            cache: A Cache instance used to store answer records.
+            cache: A AbstractCache instance used to store answer records.
         """
         super().__init__(tunnels)
 
-        self._cache: MutableMapping[Question, Answer] = cache or Cache(10000)
+        self._cache = cache or LruCache(10000)
 
     def _submit_question(self, question: Question) -> Awaitable[Answer]:
         # Check the cache for the answer first
@@ -228,8 +228,9 @@ class CachedResolver(StubResolver):
     async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
         answer = await super()._aresolve_question(question)
 
-        if answer.rcode == pkt.NOERROR:
+        if answer.rcode == pkt.NOERROR and not answer.expired:
             self._cache.set_entry(question, answer)
+            self._cache.get_entry(question)
 
         return answer
 

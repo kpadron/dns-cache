@@ -8,7 +8,7 @@ import dns_cache
 from dns_cache.packet import NOERROR, RCODE, Answer, Packet, Question
 from dns_cache.resolver import CachedResolver, StubResolver
 from dns_cache.tunnel import TcpTunnel, TlsTunnel
-from dns_cache.utility import LruCache
+from dns_cache.cache import LruCache
 
 logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 random.seed(0xDEADBEEF, 2)

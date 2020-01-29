@@ -1,4 +1,4 @@
-from asyncio import Transport, TimerHandle
+from asyncio import TimerHandle, Transport
 from typing import Optional, Tuple
 
 from .packet import Packet
@@ -12,7 +12,7 @@ __all__ = \
     )
 
 
-async def resolve_query(resolver: AbstractResolver, query: bytes) -> bytes:
+async def aresolve_query(resolver: AbstractResolver, query: bytes) -> bytes:
     """Resolves a query using the provided resolver."""
     # Parse the query packet
     packet = Packet.parse(query)
@@ -71,14 +71,14 @@ class TcpServer(AbstractStreamProtocol):
         return True
 
     def _message_received(self, message: bytes) -> None:
-        async def aresolve_query() -> None:
+        async def aservice_message() -> None:
             """Resolve a query using the resolver."""
             try:
                 # Reset the idle timeout closer
                 self._cancel_closer()
 
                 # Resolve the query
-                reply = await resolve_query(self._resolver, message)
+                reply = await aresolve_query(self._resolver, message)
 
                 # Send the reply packet
                 self._write_message(reply)
@@ -93,7 +93,7 @@ class TcpServer(AbstractStreamProtocol):
                         self._start_closer()
 
         # Schedule query resolution
-        self._loop.create_task(aresolve_query())
+        self._loop.create_task(aservice_message())
         self._requests += 1
 
     def _close(self) -> None:
@@ -123,13 +123,13 @@ class UdpServer(AbstractDatagramProtocol):
         self._resolver = resolver
 
     def datagram_received(self, message: bytes, addr: Tuple[str, int]) -> None:
-        async def aresolve_query() -> None:
+        async def aservice_message() -> None:
             """Resolve a query using the resolver."""
             # Resolve the query
-            reply = resolve_query(self._resolver, message)
+            reply = await aresolve_query(self._resolver, message)
 
             # Send the reply packet
             self._transport.sendto(reply, addr)
 
         # Schedule query resolution
-        self._loop.create_task(aresolve_query())
+        self._loop.create_task(aservice_message())

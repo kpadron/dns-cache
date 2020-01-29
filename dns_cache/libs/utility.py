@@ -2,7 +2,7 @@ from collections.abc import Awaitable as _Awaitable
 from collections.abc import Collection as _Collection
 from collections.abc import Container as _Container
 from collections.abc import Sequence as _Sequence
-from typing import (Any, Awaitable, Container, Iterator)
+from typing import Any, Awaitable, Container, Iterator
 
 __all__ = \
 [

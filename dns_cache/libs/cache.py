@@ -153,7 +153,7 @@ class Cache(AbstractCache):
         return iter(self._mapping.items())
 
     def __repr__(self) -> str:
-        return f'{self.__class__.__name__}({self._size!r}, {self._mapping!r})'
+        return f'{self.__class__.__name__}({self._size!r}, {dict(iter(self))!r})'
 
     def trim(self) -> None:
         if self._size is not None:

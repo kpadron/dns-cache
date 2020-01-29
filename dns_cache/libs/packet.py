@@ -1,8 +1,8 @@
 import itertools as it
 import struct
 import time
-from typing import Iterable, Optional, Iterator, Sequence
 from collections.abc import Hashable as _Hashable
+from typing import Iterable, Iterator, Optional, Sequence
 
 import dnslib as dl
 from dnslib import RCODE, RR, DNSQuestion, DNSRecord

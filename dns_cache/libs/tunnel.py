@@ -7,8 +7,8 @@ from struct import Struct
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSet, Optional, Tuple)
 
-from . import utility as utl
 from .protocol import AbstractStreamProtocol
+from .utility import CollectionView
 
 __all__ = \
     (
@@ -341,7 +341,7 @@ class TcpTunnel(AbstractTunnel):
 
     @property
     def queries(self) -> Collection[int]:
-        return utl.CollectionView(self._queries)
+        return CollectionView(self._queries)
 
     def submit_query(self, query: bytes) -> Awaitable[bytes]:
         async def aresolution() -> Awaitable[bytes]:

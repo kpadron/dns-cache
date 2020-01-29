@@ -25,7 +25,7 @@ class _BaseProtocol(BaseProtocol):
         )
 
     def __init__(self) -> None:
-        """Initializes a _AbstractProtocol instance."""
+        """Initializes a _BaseProtocol instance."""
         self._loop = aio.get_event_loop()
         self._transport: Optional[BaseTransport] = None
         self._connected = False

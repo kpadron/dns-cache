@@ -1,7 +1,7 @@
 import argparse as ap
 import asyncio as aio
 
-from libs import AutoResolver, TcpServer, TlsTunnel, UdpServer
+from libs import CachedResolver, AutoResolver, TcpServer, TlsTunnel, UdpServer
 
 DEFAULT_SERVERS = \
     (
@@ -28,11 +28,20 @@ def main() -> None:
     tunnels = [TlsTunnel(*args) for args in upstream_servers]
     resolver = AutoResolver(tunnels)
 
-    servers, transports = [], []
+    tcp_factory = lambda: TcpServer(resolver)
+    udp_factory = lambda: UdpServer(resolver)
+
+    servers = []
+    transports = []
+
     for (host, port) in local_addrs:
-        server = loop.run_until_complete(loop.create_server(lambda: TcpServer(resolver), host, port))
+        tcp_awaitable = loop.create_server(tcp_factory, host, port)
+        udp_awaitable = loop.create_datagram_endpoint(udp_factory, (host, port))
+
+        gather_awaitable = aio.gather(tcp_awaitable, udp_awaitable)
+        (server, (transport, _)) = loop.run_until_complete(gather_awaitable)
+
         servers.append(server)
-        (transport, _) = loop.run_until_complete(loop.create_datagram_endpoint(lambda: UdpServer(resolver), (host, port)))
         transports.append(transport)
 
     try:
@@ -44,6 +53,9 @@ def main() -> None:
 
         for transport in transports:
             transport.close()
+
+        for tunnel in tunnels:
+            tunnel.close()
 
         for server in servers:
             loop.run_until_complete(server.wait_closed())

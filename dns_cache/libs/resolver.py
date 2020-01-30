@@ -1,9 +1,9 @@
 import asyncio as aio
-from itertools import cycle
+import struct
 from abc import ABCMeta, abstractmethod
 from array import array
 from asyncio import Future, Task
-from struct import Struct
+from itertools import cycle
 from typing import (Awaitable, Collection, Iterable, Iterator, MutableMapping,
                     Optional, Sequence)
 
@@ -119,19 +119,22 @@ class StubResolver(AbstractResolver):
         return set(self._answers)
 
     def submit_question(self, question: Question) -> Awaitable[Answer]:
+        def done_cb(future: Future) -> None:
+            """Removes a future from tracking when it finishes."""
+            del self._answers[question]
+
         # Return the original task if this is a duplicate question
         answer_task = self._answers.get(question)
         if answer_task is not None:
-            return answer_task
+            return aio.shield(answer_task)
 
         # Schedule the question resolution
-        answer_task = aio.shield(self._aresolve_question(question))
+        answer_task = self._loop.create_task(self._aresolve_question(question))
+        answer_task.add_done_callback(done_cb)
         self._answers[question] = answer_task
 
-        return answer_task
-
-    _packer = Struct('!H').pack
-    _pack = lambda s, n, p: s._packer(n) + p
+        # Return the resolution task
+        return aio.shield(answer_task)
 
     async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
         """Resolves a question using the via the tunnel streams."""
@@ -143,7 +146,7 @@ class StubResolver(AbstractResolver):
                 try: self._counters[tunnel_index] += 1
                 except OverflowError: self._counters[tunnel_index] = 0
 
-                tunnel_query = self._pack(msg_id, query_tail)
+                tunnel_query = struct.pack('!H', msg_id) + query_tail
                 tunnel = self._tunnels[tunnel_index]
                 return await tunnel.submit_query(tunnel_query)
 
@@ -172,18 +175,14 @@ class StubResolver(AbstractResolver):
         # Wait 2000 ms per query resolution
         QUERY_TIMEOUT = 2.0
 
+        query_tail = question.to_query(0)[2:]
+
         try:
-            query_tail = question.to_query(0)[2:]
+            reply = await aio.wait_for(query_tunnels(), QUERY_TIMEOUT)
+            return pkt.Packet.parse(reply).get_answer()
 
-            try:
-                reply = await aio.wait_for(query_tunnels(), QUERY_TIMEOUT)
-                return pkt.Packet.parse(reply).get_answer()
-
-            except (aio.TimeoutError, ConnectionError):
-                return Answer(pkt.SERVFAIL)
-
-        finally:
-            del self._answers[question]
+        except (aio.TimeoutError, ConnectionError):
+            return Answer(pkt.SERVFAIL)
 
 
 class CachedResolver(StubResolver):
@@ -238,13 +237,12 @@ class AutoResolver(CachedResolver):
 
         self._refresher = self._loop.create_task(self._arefresh())
 
-    def __del__(self) -> None:
-        self._refresher.cancel()
-
     async def _arefresh(self) -> Awaitable[None]:
         """Asynchronously refreshes cached records."""
+        MIN_SLEEP_TIME = 10
+
         while True:
-            await aio.sleep(10)
+            await aio.sleep(MIN_SLEEP_TIME)
 
             questions = [question for (question, answer) in self._cache if answer.expired]
             answers = await aio.gather(*(StubResolver._aresolve_question(self, question) for question in questions))

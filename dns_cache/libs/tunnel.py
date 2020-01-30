@@ -1,9 +1,9 @@
 import asyncio as aio
 import logging
 import ssl
-from abc import ABCMeta, abstractmethod
+import struct
+from abc import ABC, abstractmethod
 from asyncio import Future, Transport
-from struct import Struct
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSet, Optional, Tuple)
 
@@ -21,7 +21,7 @@ __all__ = \
 logger = logging.getLogger(__name__)
 
 
-class AbstractTunnel(metaclass=ABCMeta):
+class AbstractTunnel(ABC):
     """
     DNS transport tunnel abstract base class.
 
@@ -225,15 +225,21 @@ class Stream(AbstractStreamProtocol):
         """Deinitializes the stream connection."""
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection lost')
 
-        # Ensure the tranport is closed
-        self._transport.abort()
+        self._peer = None
 
+        transport = self._transport
+        replies = self._replies
         super().connection_lost(exc)
 
+        # Ensure the tranport is closed
+        transport.abort()
+
         # Finalize reply futures
-        for reply_future in self._replies.values():
+        for reply_future in replies.values():
             if not reply_future.done():
                 reply_future.set_result(None)
+
+        replies.clear()
 
     def eof_received(self) -> None:
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> EOF received - buffer={self._buffer!r}')
@@ -265,7 +271,7 @@ class Stream(AbstractStreamProtocol):
             raise ConnectionError('Stream is not connected')
 
         # Extract query message id
-        msg_id: int = self._peek(query)
+        msg_id: int = struct.unpack_from('!H', query)[0]
 
         assert msg_id not in self._replies
 
@@ -290,17 +296,21 @@ class Stream(AbstractStreamProtocol):
             if reply is None:
                 raise ConnectionResetError('Stream connection was broken')
 
-            # Return reply packet
+            # Return the reply packet
             return reply
 
-        finally:
-            del self._replies[msg_id]
+        except aio.CancelledError:
+            reply_future.cancel()
+            raise
 
     def _message_received(self, message: bytes):
         # Set the result for the reply future
-        reply_future = self._replies.get(self._peek(message))
-        if reply_future is not None and not reply_future.done():
-            reply_future.set_result(message)
+        msg_id: int = struct.unpack_from('!H', message)[0]
+        reply_future = self._replies.get(msg_id)
+        if reply_future is not None:
+            del self._replies[msg_id]
+            if not reply_future.done():
+                reply_future.set_result(message)
 
 
 class TcpTunnel(AbstractTunnel):
@@ -308,9 +318,6 @@ class TcpTunnel(AbstractTunnel):
 
     # Maximum number of outstanding queries before new submissions will block
     MAX_QUERIES: int = 10000
-
-    _peeker = Struct('!H').unpack_from
-    _peek = lambda s, p: s._peeker(p)[0]
 
     def __init__(self, host: str, port: int) -> None:
         """
@@ -382,7 +389,7 @@ class TcpTunnel(AbstractTunnel):
             raise ValueError('Malformed query packet (too big)')
 
         # Forbid duplicate query ids
-        msg_id: int = self._peek(query)
+        msg_id: int = struct.unpack_from('!H', query)[0]
         if msg_id in self._queries:
             raise ValueError(f'Already processing message id 0x{msg_id:04x} ({msg_id})')
 

@@ -1,4 +1,4 @@
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from collections import OrderedDict
 from itertools import islice
 from typing import (Any, Hashable, Iterable, Iterator, Mapping, Optional,
@@ -13,7 +13,7 @@ __all__ = \
     )
 
 
-class AbstractCache(metaclass=ABCMeta):
+class AbstractCache(ABC):
     """
     Generic cache abstract base class.
 

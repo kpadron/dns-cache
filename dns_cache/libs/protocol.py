@@ -1,9 +1,8 @@
 import asyncio as aio
-from abc import ABCMeta, abstractmethod
-from asyncio import (BaseProtocol, BaseTransport, DatagramProtocol, Future,
-                     Protocol)
-from struct import Struct
-from typing import Awaitable, MutableSequence, Optional, Tuple
+import struct
+from abc import ABC, abstractmethod
+from asyncio import BaseProtocol, BaseTransport, DatagramProtocol, Protocol
+from typing import Awaitable, Optional, Tuple
 
 __all__ = \
     (
@@ -21,21 +20,26 @@ class _BaseProtocol(BaseProtocol):
             '_transport',
             '_connected',
             '_paused',
-            '_drainers',
+            '_drainer',
         )
 
     def __init__(self) -> None:
         """Initializes a _BaseProtocol instance."""
         self._loop = aio.get_event_loop()
-        self._transport: Optional[BaseTransport] = None
+        self._transport = None
         self._connected = False
         self._paused = False
-        self._drainers: MutableSequence[Future] = []
+        self._drainer = None
 
     @property
     def connected(self) -> bool:
         """Returns whether the connection is established."""
         return self._connected
+
+    @property
+    def paused(self) -> bool:
+        """Returns whether the connection is paused for writing."""
+        return self._paused
 
     def connection_made(self, transport: BaseTransport) -> None:
         """Initializes the connection."""
@@ -52,18 +56,25 @@ class _BaseProtocol(BaseProtocol):
 
     def pause_writing(self) -> None:
         """Pauses writing to the connection."""
+        if self._paused:
+            return
+
         assert self._connected
         self._paused = True
 
     def resume_writing(self) -> None:
         """Resumes writing to the connection."""
+        if not self._paused:
+            return
+
         self._paused = False
 
-        for drainer in self._drainers:
-            if not drainer.done():
-                drainer.set_result(None)
+        drainer = self._drainer
+        assert drainer is None or not drainer.done()
 
-        self._drainers.clear()
+        if drainer is not None:
+            drainer.set_result(None)
+            self._drainer = None
 
     async def _drain_writes(self) -> Awaitable[None]:
         """Waits for buffered data to be flushed to the connection."""
@@ -72,13 +83,17 @@ class _BaseProtocol(BaseProtocol):
 
         assert self._connected
 
-        drainer = self._loop.create_future()
-        self._drainers.append(drainer)
+        drainer = self._drainer
+        assert drainer is None or not drainer.done()
 
-        await drainer
+        if drainer is None:
+            drainer = self._loop.create_future()
+            self._drainer = drainer
+
+        await aio.shield(drainer)
 
 
-class AbstractStreamProtocol(_BaseProtocol, Protocol, metaclass=ABCMeta):
+class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
     """
     Stream based async DNS protocol abstract base class.
 
@@ -88,12 +103,6 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, metaclass=ABCMeta):
     """
 
     __slots__ = '_buffer'
-
-    _peeker = Struct('!H').unpack_from
-    _peek = lambda s, p: s._peeker(p)[0]
-
-    _prefixer = Struct('!H').pack
-    _prefix = lambda s, p: s._prefixer(len(p)) + p
 
     def __init__(self) -> None:
         """Initializes a AbstractStreamProtocol instance."""
@@ -118,7 +127,7 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, metaclass=ABCMeta):
                 return
 
             # Peek the DNS message fields
-            msg_size = self._peek(buffer)
+            msg_size = struct.unpack_from('!H', buffer)[0]
 
             # Verify that the reported message size is sane
             msg_size += 2
@@ -150,10 +159,11 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, metaclass=ABCMeta):
 
     def _write_message(self, message: bytes) -> None:
         """Writes a message to the transport stream."""
-        self._transport.write(self._prefix(message))
+        prefixed_message = struct.pack('!H', len(message)) + message
+        self._transport.write(prefixed_message)
 
 
-class AbstractDatagramProtocol(_BaseProtocol, DatagramProtocol, metaclass=ABCMeta):
+class AbstractDatagramProtocol(_BaseProtocol, DatagramProtocol, ABC):
     """
     Datagram based async DNS protocol abstract base class.
     

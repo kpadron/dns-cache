@@ -218,9 +218,9 @@ class Stream(AbstractStreamProtocol):
         super().connection_made(transport)
 
         self._peer = transport.get_extra_info('peername')
+        self.schedule_closer()
 
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection established')
-
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         """Deinitializes the stream connection."""
@@ -280,6 +280,9 @@ class Stream(AbstractStreamProtocol):
         reply_future = self._loop.create_future()
         self._replies[msg_id] = reply_future
 
+        # Cancel the closer since there are now outstanding queries
+        self.cancel_closer()
+
         try:
             # Async checkpoint (check for cancellation or broken stream)
             await aio.sleep(0)
@@ -289,7 +292,7 @@ class Stream(AbstractStreamProtocol):
                 raise ConnectionResetError('Stream connection was broken')
 
             # Write the query to the transport stream
-            self._write_message(query)
+            self.write_message(query)
             await self._drain_writes()
 
             # Wait for the reply to be received
@@ -309,16 +312,18 @@ class Stream(AbstractStreamProtocol):
         msg_id: int = struct.unpack_from('!H', message)[0]
         reply_future = self._replies.get(msg_id)
         if reply_future is not None:
-            del self._replies[msg_id]
             if not reply_future.done():
                 reply_future.set_result(message)
+
+            del self._replies[msg_id]
+
+        # Schedule the closer if there are no outstanding queries
+        if not self._replies:
+            self.schedule_closer()
 
 
 class TcpTunnel(AbstractTunnel):
     """DNS tunnel over TCP transport class."""
-
-    # Maximum number of outstanding queries before new submissions will block
-    MAX_QUERIES: int = 10000
 
     def __init__(self, host: str, port: int) -> None:
         """
@@ -333,7 +338,7 @@ class TcpTunnel(AbstractTunnel):
         self.host = str(host)
         self.port = int(port)
 
-        self._limiter = aio.Semaphore(self.MAX_QUERIES)
+        self._limiter = aio.Semaphore(10000)
         self._clock = aio.Lock()
 
         self._queries: MutableSet[int] = set()

@@ -1,7 +1,7 @@
 import asyncio as aio
 import struct
 from abc import ABC, abstractmethod
-from asyncio import BaseProtocol, BaseTransport, DatagramProtocol, Protocol
+from asyncio import BaseTransport
 from typing import Awaitable, Optional, Tuple
 
 __all__ = \
@@ -11,7 +11,7 @@ __all__ = \
     )
 
 
-class _BaseProtocol(BaseProtocol):
+class _BaseProtocol(aio.BaseProtocol):
     """Async DNS protocol base class."""
 
     __slots__ = \
@@ -40,6 +40,11 @@ class _BaseProtocol(BaseProtocol):
     def paused(self) -> bool:
         """Returns whether the connection is paused for writing."""
         return self._paused
+
+    def close(self) -> None:
+        """Closes the transport used by the instance."""
+        if self._connected:
+            self._transport.close()
 
     def connection_made(self, transport: BaseTransport) -> None:
         """Initializes the connection."""
@@ -93,7 +98,7 @@ class _BaseProtocol(BaseProtocol):
         await aio.shield(drainer)
 
 
-class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
+class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
     """
     Stream based async DNS protocol abstract base class.
 
@@ -102,16 +107,46 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
         eof_received: Called when EOF is received from the peer.
     """
 
-    __slots__ = '_buffer'
+    __slots__ = \
+        (
+            '_buffer',
+            '_closer',
+        )
 
     def __init__(self) -> None:
         """Initializes a AbstractStreamProtocol instance."""
         super().__init__()
 
         self._buffer = bytearray()
+        self._closer: Optional[aio.Handle] = None
+
+    def write_message(self, message: bytes) -> None:
+        """Writes a message to the transport."""
+        prefixed_message = struct.pack('!H', len(message)) + message
+        self._transport.write(prefixed_message)
+
+    def schedule_closer(self, delay: float = 3.0) -> None:
+        """Schedules the closing of the transport."""
+        closer = self._closer
+
+        if closer is None:
+            self._closer = self._loop.call_later(delay, self.close)
+
+    def cancel_closer(self) -> None:
+        """Cancels the scheduled closing of the transport."""
+        closer = self._closer
+
+        if closer is not None:
+            closer.cancel()
+            self._closer = None
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        super().connection_lost(exc)
+        self._buffer.clear()
+        self.cancel_closer()
 
     def data_received(self, data: bytes) -> None:
-        """Receives data from the connection."""
+        """Receives data from the transport."""
         # Minimum size of a DNS message with a length prefix
         MIN_PREFIXED_SIZE = 14
 
@@ -133,7 +168,7 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
             msg_size += 2
             if msg_size < MIN_PREFIXED_SIZE:
                 # Corrupted/Malicious DNS message stream
-                self._transport.abort()
+                self.close()
                 return
 
             # Ensure we have the a full DNS message
@@ -149,7 +184,7 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
 
     @abstractmethod
     def eof_received(self):
-        """Handles receiving EOF from the connection."""
+        """Handles receiving EOF from the transport."""
         raise NotImplementedError
 
     @abstractmethod
@@ -157,13 +192,8 @@ class AbstractStreamProtocol(_BaseProtocol, Protocol, ABC):
         """Called when a full DNS message is received."""
         raise NotImplementedError
 
-    def _write_message(self, message: bytes) -> None:
-        """Writes a message to the transport stream."""
-        prefixed_message = struct.pack('!H', len(message)) + message
-        self._transport.write(prefixed_message)
 
-
-class AbstractDatagramProtocol(_BaseProtocol, DatagramProtocol, ABC):
+class AbstractDatagramProtocol(_BaseProtocol, aio.DatagramProtocol, ABC):
     """
     Datagram based async DNS protocol abstract base class.
     

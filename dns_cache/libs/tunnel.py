@@ -8,7 +8,6 @@ from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSet, Optional, Tuple)
 
 from .protocol import AbstractStreamProtocol
-from .utility import CollectionView
 
 __all__ = \
     (
@@ -27,7 +26,7 @@ class AbstractTunnel(ABC):
 
     Pure Virtual Properties:
         connected: Whether the tunnel is connected or not.
-        queries: A read-only view of the current outstanding queries.
+        queries: A snapshot view of the current outstanding queries.
 
     Pure Virtual Methods:
         __init__: Initializes a new tunnel instance.
@@ -35,6 +34,7 @@ class AbstractTunnel(ABC):
         close: Closes the tunnel connection.
         submit_query: Submits a DNS query to be resolved.
     """
+
     __slots__ = '_loop'
 
     @abstractmethod
@@ -69,7 +69,7 @@ class AbstractTunnel(ABC):
     @property
     @abstractmethod
     def queries(self) -> Collection[int]:
-        """Returns a read-only view of the queries currently tracked by the instance."""
+        """Returns a snapshot view of the queries currently tracked by the instance."""
         raise NotImplementedError
 
     def open(self, timeout: Optional[float] = None) -> None:
@@ -216,6 +216,7 @@ class Stream(AbstractStreamProtocol):
     def connection_made(self, transport: Transport) -> None:
         """Initializes the stream connection."""
         super().connection_made(transport)
+
         self._peer = transport.get_extra_info('peername')
 
         logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection established')
@@ -348,7 +349,7 @@ class TcpTunnel(AbstractTunnel):
 
     @property
     def queries(self) -> Collection[int]:
-        return CollectionView(self._queries)
+        return set(self._queries)
 
     def submit_query(self, query: bytes) -> Awaitable[bytes]:
         async def aresolution() -> Awaitable[bytes]:
@@ -412,23 +413,30 @@ class TcpTunnel(AbstractTunnel):
                         **kwargs)
 
                 except Exception as exc:
-                    if not isinstance(exc, ConnectionError):
-                        raise ConnectionError from exc
+                    if isinstance(exc, ConnectionError):
+                        raise
+
+                    raise ConnectionError from exc
 
     def close(self) -> None:
         # Only close if currently open
         if self.connected:
+            stream = self._stream
+            self._stream = None
+
             try:
-                self._stream.abort()
-                self._stream = None
+                stream.abort()
 
             except Exception as exc:
-                if not isinstance(exc, ConnectionError):
-                        raise ConnectionError from exc
+                if isinstance(exc, ConnectionError):
+                    raise
+
+                raise ConnectionError from exc
 
 
 class TlsTunnel(TcpTunnel):
     """DNS tunnel over TLS transport class."""
+
     def __init__(self, host: str, port: int, authname: str, cafile: Optional[str] = None) -> None:
         """
         Initialize a TlsTunnel instance.

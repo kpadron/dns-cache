@@ -1,6 +1,6 @@
 import asyncio as aio
 import struct
-from abc import ABCMeta, abstractmethod
+from abc import ABC, abstractmethod
 from array import array
 from asyncio import Future, Task
 from itertools import cycle
@@ -11,7 +11,6 @@ from . import packet as pkt
 from .cache import AbstractCache, LruCache
 from .packet import Answer, Question
 from .tunnel import AbstractTunnel
-from .utility import SequenceView
 
 __all__ = \
 [
@@ -22,7 +21,7 @@ __all__ = \
 ]
 
 
-class AbstractResolver(metaclass=ABCMeta):
+class AbstractResolver(ABC):
     """A DNS resolver abstract base class."""
 
     __slots__ = '_loop'

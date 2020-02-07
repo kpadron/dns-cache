@@ -264,10 +264,11 @@ class AutoResolver(CachedResolver):
                 answers = await aio.gather(*resolutions)
 
                 for (question, answer) in zip(questions, answers):
-                    if answer.rcode == pkt.NOERROR and not answer.expired:
+                    if self._is_cacheable(answer):
                         self._cache.set_entry(question, answer)
 
                 print(self._cache.stats)
 
         except Exception as exc:
             print(exc)
+            raise

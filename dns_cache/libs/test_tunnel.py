@@ -4,11 +4,11 @@ import random
 import time
 from unittest import TestCase, main
 
-import dns_cache
-from dns_cache.packet import NOERROR, RCODE, Answer, Packet, Question
-from dns_cache.resolver import CachedResolver, StubResolver
-from dns_cache.tunnel import TcpTunnel, TlsTunnel
-from dns_cache.cache import LruCache
+from .. import libs
+from libs.packet import NOERROR, RCODE, Answer, Packet, Question
+from libs.resolver import CachedResolver, StubResolver
+from libs.tunnel import TcpTunnel, TlsTunnel
+from libs.cache import LruCache
 
 logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 random.seed(0xDEADBEEF, 2)

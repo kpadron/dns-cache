@@ -1,8 +1,8 @@
 from asyncio import TimerHandle, Transport
 from typing import Optional, Tuple
 
+from . import protocols
 from .packet import Packet
-from .protocol import AbstractDatagramProtocol, AbstractStreamProtocol
 from .resolver import AbstractResolver
 
 __all__ = \
@@ -34,7 +34,7 @@ async def aresolve_query(resolver: AbstractResolver, query: bytes) -> bytes:
     return packet.encode()
 
 
-class TcpServer(AbstractStreamProtocol):
+class TcpServer(protocols.AbstractStreamProtocol):
     """TCP DNS stub server class."""
 
     __slots__ = \
@@ -50,17 +50,31 @@ class TcpServer(AbstractStreamProtocol):
 
         self._resolver = resolver
         self._flushing = False
-        self._requests = 0
+        self._requests = set()
 
     def connection_made(self, transport: Transport) -> None:
         super().connection_made(transport)
         self.schedule_closer()
 
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        transport = self._transport
+        requests = self._requests
+        super().connection_lost(exc)
+
+        # Ensure the tranport is closed
+        transport.abort()
+
+        # Finalize requests
+        for request in requests:
+            request.cancel()
+
+        requests.clear()
+
     def eof_received(self) -> bool:
         self._flushing = True
         return bool(self._requests)
 
-    def _message_received(self, message: bytes) -> None:
+    def message_received(self, message: bytes) -> None:
         async def aservice_message() -> None:
             """Resolve a query using the resolver."""
             try:
@@ -72,22 +86,23 @@ class TcpServer(AbstractStreamProtocol):
 
                 # Send the reply packet
                 self.write_message(reply)
+                await self.adrain_writes()
 
             finally:
-                self._requests -= 1
+                self._requests.discard(request)
 
-                if not self._requests:
+                if not self._requests and self._connected:
                     if self._flushing:
                         self.close()
                     else:
                         self.schedule_closer()
 
         # Schedule query resolution
-        self._loop.create_task(aservice_message())
-        self._requests += 1
+        request = self._loop.create_task(aservice_message())
+        self._requests.add(request)
 
 
-class UdpServer(AbstractDatagramProtocol):
+class UdpServer(protocols.AbstractDatagramProtocol):
     """UDP DNS stub server class."""
 
     __slots__ = '_resolver'
@@ -106,6 +121,7 @@ class UdpServer(AbstractDatagramProtocol):
 
             # Send the reply packet
             self._transport.sendto(reply, addr)
+            await self.adrain_writes()
 
         # Schedule query resolution
         self._loop.create_task(aservice_message())

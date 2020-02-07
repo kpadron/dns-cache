@@ -220,11 +220,26 @@ class CachedResolver(StubResolver):
     async def _aresolve_question(self, question: Question) -> Awaitable[Answer]:
         answer = await super()._aresolve_question(question)
 
-        if answer.rcode == pkt.NOERROR and not answer.expired:
+        if self._is_cacheable(answer):
             self._cache.set_entry(question, answer)
             self._cache.get_entry(question)
 
         return answer
+
+    def _is_cacheable(self, answer: Answer) -> bool:
+        """Returns true if the answer should be cached."""
+        try:
+            next(answer.records)
+        except StopIteration:
+            return False
+
+        if answer.rcode != pkt.NOERROR:
+            return False
+
+        if answer.expired:
+            return False
+
+        return True
 
 
 class AutoResolver(CachedResolver):

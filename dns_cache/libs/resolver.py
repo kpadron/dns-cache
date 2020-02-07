@@ -1,4 +1,5 @@
 import asyncio as aio
+import logging
 import struct
 from abc import ABC, abstractmethod
 from array import array
@@ -13,12 +14,15 @@ from .packet import Answer, Question
 from .tunnel import AbstractTunnel
 
 __all__ = \
-[
-    'AbstractResolver',
-    'StubResolver',
-    'CachedResolver',
-    'AutoResolver',
-]
+    (
+        'AbstractResolver',
+        'StubResolver',
+        'CachedResolver',
+        'AutoResolver',
+    )
+
+
+logger = logging.getLogger(__name__)
 
 
 class AbstractResolver(ABC):
@@ -199,7 +203,7 @@ class CachedResolver(StubResolver):
         """
         super().__init__(tunnels)
 
-        self._cache = cache or LruCache(10000)
+        self._cache = cache if cache is not None else LruCache(10000)
 
     @property
     def cache(self) -> AbstractCache:
@@ -259,7 +263,7 @@ class AutoResolver(CachedResolver):
             while True:
                 await aio.sleep(MIN_SLEEP_TIME)
 
-                questions = [question for (question, answer) in self._cache.most_recent(10000)]
+                questions = [question for (question, answer) in self._cache.most_recent(10000) if answer.timeleft <= MIN_SLEEP_TIME]
                 resolutions = (StubResolver._aresolve_question(self, question) for question in questions)
                 answers = await aio.gather(*resolutions)
 
@@ -267,7 +271,7 @@ class AutoResolver(CachedResolver):
                     if self._is_cacheable(answer):
                         self._cache.set_entry(question, answer)
 
-                print(self._cache.stats)
+                logger.info(f'<AutoResolver {id(self):x}> Refresher woke up - cache.stats={self._cache.stats!r}')
 
         except Exception as exc:
             print(exc)

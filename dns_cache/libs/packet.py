@@ -132,6 +132,11 @@ class Answer:
         return self._min_ttl
 
     @property
+    def timeleft(self) -> float:
+        """Returns the time left until the instance is expired."""
+        return self._time + self.ttl - time.monotonic()
+
+    @property
     def expired(self) -> bool:
         """Returns whether the instance has expired or not."""
         return time.monotonic() > self._time + self.ttl

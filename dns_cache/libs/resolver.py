@@ -247,7 +247,7 @@ class AutoResolver(CachedResolver):
 
     def __init__(self, tunnels: Iterable[AbstractTunnel]) -> None:
         """Initialize a AutoResolver instance."""
-        super().__init__(tunnels)
+        super().__init__(tunnels, LruCache(50000))
 
         self._refresher = self._loop.create_task(self._arefresh())
 
@@ -255,12 +255,19 @@ class AutoResolver(CachedResolver):
         """Asynchronously refreshes cached records."""
         MIN_SLEEP_TIME = 10
 
-        while True:
-            await aio.sleep(MIN_SLEEP_TIME)
+        try:
+            while True:
+                await aio.sleep(MIN_SLEEP_TIME)
 
-            questions = [question for (question, answer) in self._cache if answer.expired]
-            answers = await aio.gather(*(StubResolver._aresolve_question(self, question) for question in questions))
+                questions = [question for (question, answer) in self._cache.most_recent(10000)]
+                resolutions = (StubResolver._aresolve_question(self, question) for question in questions)
+                answers = await aio.gather(*resolutions)
 
-            for (question, answer) in zip(questions, answers):
-                if answer.rcode == pkt.NOERROR and not answer.expired:
-                    self._cache.set_entry(question, answer)
+                for (question, answer) in zip(questions, answers):
+                    if answer.rcode == pkt.NOERROR and not answer.expired:
+                        self._cache.set_entry(question, answer)
+
+                print(self._cache.stats)
+
+        except Exception as exc:
+            print(exc)

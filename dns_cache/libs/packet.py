@@ -1,7 +1,7 @@
+import collections.abc
 import itertools as it
 import struct
 import time
-from collections.abc import Hashable as _Hashable
 from typing import Iterable, Iterator, Optional, Sequence
 
 import dnslib as dl
@@ -23,7 +23,7 @@ FORMERR = RCODE.FORMERR
 SERVFAIL = RCODE.SERVFAIL
 
 
-class Question(DNSQuestion, _Hashable):
+class Question(DNSQuestion, collections.abc.Hashable):
     """DNS question class."""
     def __init__(self, qname: str, qtype: str = 'A', qclass: str = 'IN') -> None:
         """
@@ -120,10 +120,14 @@ class Answer:
         return it.chain(self.answer, self.authority, self.additional)
 
     @property
-    def ttl(self) -> float:
+    def ttl(self) -> int:
         """Returns the minimum ttl of all instance records."""
         if self._min_ttl is None:
-            self._min_ttl = min(record.ttl for record in self.records)
+            try:
+                self._min_ttl = min(record.ttl for record in self.records)
+
+            except ValueError:
+                self._min_ttl = 0
 
         return self._min_ttl
 

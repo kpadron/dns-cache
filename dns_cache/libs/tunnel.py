@@ -3,11 +3,11 @@ import logging
 import ssl
 import struct
 from abc import ABC, abstractmethod
-from asyncio import Future, Transport
+from asyncio import Transport
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSet, Optional, Tuple)
 
-from .protocol import AbstractStreamProtocol
+from . import protocols
 
 __all__ = \
     (
@@ -192,7 +192,7 @@ class AbstractTunnel(ABC):
         raise NotImplementedError
 
 
-class Stream(AbstractStreamProtocol):
+class Stream(protocols.AbstractStreamProtocol):
     """DNS over stream-based transport protocol."""
 
     __slots__ = \
@@ -206,7 +206,7 @@ class Stream(AbstractStreamProtocol):
         super().__init__()
 
         self._peer: Optional[Tuple[str, int]] = None
-        self._replies: MutableMapping[int, Future] = {}
+        self._replies: MutableMapping[int, aio.Future] = {}
 
     @property
     def peer(self) -> Optional[Tuple[str, int]]:
@@ -224,7 +224,7 @@ class Stream(AbstractStreamProtocol):
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         """Deinitializes the stream connection."""
-        logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection lost')
+        logger.info(f'<{self.__class__.__name__} {id(self):x} {self._peer}> Connection lost - exc={exc!r}')
 
         self._peer = None
 
@@ -287,13 +287,9 @@ class Stream(AbstractStreamProtocol):
             # Async checkpoint (check for cancellation or broken stream)
             await aio.sleep(0)
 
-            # Ensure the transport stream is connected
-            if not self._connected:
-                raise ConnectionResetError('Stream connection was broken')
-
             # Write the query to the transport stream
             self.write_message(query)
-            await self._drain_writes()
+            await self.adrain_writes()
 
             # Wait for the reply to be received
             reply = await reply_future
@@ -307,7 +303,7 @@ class Stream(AbstractStreamProtocol):
             reply_future.cancel()
             raise
 
-    def _message_received(self, message: bytes):
+    def message_received(self, message: bytes):
         # Set the result for the reply future
         msg_id: int = struct.unpack_from('!H', message)[0]
         reply_future = self._replies.get(msg_id)
@@ -364,6 +360,8 @@ class TcpTunnel(AbstractTunnel):
                 async with self._limiter:
                     # Attempt to resolve the query
                     while True:
+                        stream = None
+
                         try:
                             # Ensure that the tunnel is connected
                             if not self.connected:
@@ -416,6 +414,9 @@ class TcpTunnel(AbstractTunnel):
                         self.host,
                         self.port,
                         **kwargs)
+
+                except aio.CancelledError:
+                    raise
 
                 except Exception as exc:
                     if isinstance(exc, ConnectionError):

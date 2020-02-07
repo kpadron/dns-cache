@@ -38,11 +38,11 @@ class _BaseProtocol(aio.BaseProtocol):
 
     @property
     def paused(self) -> bool:
-        """Returns whether the connection is paused for writing."""
+        """Returns whether the transport is paused for writing."""
         return self._paused
 
     def close(self) -> None:
-        """Closes the transport used by the instance."""
+        """Closes the transport."""
         if self._connected:
             self._transport.close()
 
@@ -60,15 +60,18 @@ class _BaseProtocol(aio.BaseProtocol):
         self.resume_writing()
 
     def pause_writing(self) -> None:
-        """Pauses writing to the connection."""
+        """Pauses writing to the transport."""
         if self._paused:
             return
+
+        if not self._connected:
+            raise ConnectionError('not connected')
 
         assert self._connected
         self._paused = True
 
     def resume_writing(self) -> None:
-        """Resumes writing to the connection."""
+        """Resumes writing to the transport."""
         if not self._paused:
             return
 
@@ -81,8 +84,8 @@ class _BaseProtocol(aio.BaseProtocol):
             drainer.set_result(None)
             self._drainer = None
 
-    async def _drain_writes(self) -> Awaitable[None]:
-        """Waits for buffered data to be flushed to the connection."""
+    async def adrain_writes(self) -> Awaitable[None]:
+        """Waits for buffered data to be flushed to the transport."""
         if not self._paused:
             return
 
@@ -103,7 +106,7 @@ class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
     Stream based async DNS protocol abstract base class.
 
     Pure Virtual Methods:
-        _message_received: Called when a full DNS message is received.
+        message_received: Called when a full DNS message is received.
         eof_received: Called when EOF is received from the peer.
     """
 
@@ -121,12 +124,18 @@ class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
         self._closer: Optional[aio.Handle] = None
 
     def write_message(self, message: bytes) -> None:
-        """Writes a message to the transport."""
+        """Writes a DNS message to the transport."""
+        if not self._connected:
+            raise ConnectionError('not connected')
+
         prefixed_message = struct.pack('!H', len(message)) + message
         self._transport.write(prefixed_message)
 
     def schedule_closer(self, delay: float = 3.0) -> None:
         """Schedules the closing of the transport."""
+        if not self._connected:
+            raise ConnectionError('not connected')
+
         closer = self._closer
 
         if closer is None:
@@ -162,10 +171,9 @@ class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
                 return
 
             # Peek the DNS message fields
-            msg_size = struct.unpack_from('!H', buffer)[0]
+            msg_size = struct.unpack_from('!H', buffer)[0] + 2
 
             # Verify that the reported message size is sane
-            msg_size += 2
             if msg_size < MIN_PREFIXED_SIZE:
                 # Corrupted/Malicious DNS message stream
                 self.close()
@@ -179,16 +187,20 @@ class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
             message = buffer[2:msg_size]
             del buffer[:msg_size]
 
-            # Call the _message_received callback
-            self._message_received(message)
+            # Call the message_received callback
+            self.message_received(message)
 
     @abstractmethod
-    def eof_received(self):
-        """Handles receiving EOF from the transport."""
+    def eof_received(self) -> bool:
+        """
+        Handles receiving EOF from the transport.
+
+        Returning false implicitly closes the transport.
+        """
         raise NotImplementedError
 
     @abstractmethod
-    def _message_received(self, message: bytes) -> None:
+    def message_received(self, message: bytes) -> None:
         """Called when a full DNS message is received."""
         raise NotImplementedError
 
@@ -196,7 +208,7 @@ class AbstractStreamProtocol(_BaseProtocol, aio.Protocol, ABC):
 class AbstractDatagramProtocol(_BaseProtocol, aio.DatagramProtocol, ABC):
     """
     Datagram based async DNS protocol abstract base class.
-    
+
     Pure Virtual Methods:
         datagram_received: Called when a full DNS message is received.
     """
@@ -205,9 +217,9 @@ class AbstractDatagramProtocol(_BaseProtocol, aio.DatagramProtocol, ABC):
 
     @abstractmethod
     def datagram_received(self, data: bytes, addr: Tuple[str, int]) -> None:
-        """Receives a datagram from the connection."""
+        """Receives a datagram from the transport."""
         raise NotImplementedError
 
     def error_received(self, exc: Exception) -> None:
-        """Handles receiving socket errors from the connection."""
+        """Handles receiving errors from the transport."""
         pass

@@ -1,7 +1,10 @@
 import argparse as ap
 import asyncio as aio
+import logging
 
 from libs import CachedResolver, AutoResolver, TcpServer, TlsTunnel, UdpServer
+
+logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 
 DEFAULT_SERVERS = \
     (
@@ -13,8 +16,8 @@ DEFAULT_SERVERS = \
 
 DEFAULT_ADDRS = \
     (
-        ('localhost', 5053),
-        # ('127.0.0.1', 5053),
+        # ('localhost', 5053),
+        ('127.0.0.1', 5053),
         # ('::1', 5053),
     )
 

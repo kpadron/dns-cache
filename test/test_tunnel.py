@@ -1,14 +1,18 @@
 import itertools as it
 import logging
+import os
 import random
+import sys
 import time
 from unittest import TestCase, main
 
-from .. import libs
-from libs.packet import NOERROR, RCODE, Answer, Packet, Question
-from libs.resolver import CachedResolver, StubResolver
-from libs.tunnel import TcpTunnel, TlsTunnel
-from libs.cache import LruCache
+sp = os.path.abspath(os.path.join(__file__, '../..'))
+sys.path.append(sp)
+
+from dns_cache.cache import LruCache
+from dns_cache.packet import NOERROR, RCODE, Answer, Packet, Question
+from dns_cache.resolver import CachedResolver, StubResolver
+from dns_cache.tunnel import TcpTunnel, TlsTunnel
 
 logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 random.seed(0xDEADBEEF, 2)
@@ -87,7 +91,7 @@ class TestStubResolver(TestCase):
         del self.resolver
         for tunnel in self.tunnels:
             tunnel.close()
-        
+
         del self.tunnels
 
     def test_resolve_question(self, questions=TEST_QUESTIONS):

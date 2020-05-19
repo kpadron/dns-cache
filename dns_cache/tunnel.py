@@ -7,7 +7,7 @@ from asyncio import Transport
 from typing import (Awaitable, Collection, Iterable, MutableMapping,
                     MutableSet, Optional, Tuple)
 
-from . import protocols
+from . import protocol
 
 __all__ = \
     (
@@ -192,7 +192,7 @@ class AbstractTunnel(ABC):
         raise NotImplementedError
 
 
-class Stream(protocols.AbstractStreamProtocol):
+class Stream(protocol.AbstractStreamProtocol):
     """DNS over stream-based transport protocol."""
 
     __slots__ = \

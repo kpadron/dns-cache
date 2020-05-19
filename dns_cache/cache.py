@@ -1,13 +1,14 @@
 from abc import ABC, abstractmethod
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from itertools import islice
+from random import sample
 from typing import (Any, Hashable, Iterable, Iterator, Mapping, Optional,
                     Tuple, Union)
 
 __all__ = \
     (
         'AbstractCache',
-        'Cache',
+        'RandomCache',
         'LruCache',
         'LfuCache',
     )
@@ -20,10 +21,10 @@ class AbstractCache(ABC):
     Pure Virtual Methods:
         __len__: Returns the current length of the cache.
         __iter__: Returns a iterator over the cache items.
-        trim: Ensure that the cache is bounded by the its size.
         get_entry: Lookup a value in the cache updating tracking.
         set_entry: Add a value to the cache updating tracking.
         del_entry: Removes a value from the cache updating tracking.
+        _get_evictees: Returns a iterable of keys that should be evicted next.
     """
 
     __slots__ = \
@@ -109,10 +110,17 @@ class AbstractCache(ABC):
         mapping.update({key: getattr(self, key) for key in keys})
         return mapping
 
-    @abstractmethod
     def trim(self) -> None:
         """Ensures the cache is bounded by the size attribute removing entries if necessary."""
-        raise NotImplementedError
+        if self._size is not None:
+            diff = len(self) - self._size
+            if diff > 0:
+                keys = list(self._get_evictees(diff))
+
+                for k in keys:
+                    self.del_entry(k)
+
+                self._evictions += diff
 
     @abstractmethod
     def get_entry(self, key: Hashable, default: Any = None) -> Any:
@@ -129,18 +137,23 @@ class AbstractCache(ABC):
         """Deletes the entry associated with key."""
         raise NotImplementedError
 
+    @abstractmethod
+    def _get_evictees(self, n: int) -> Iterable[Hashable]:
+        """Returns a iterable of the next n keys to be evicted."""
+        raise NotImplementedError
 
-class Cache(AbstractCache):
+
+class RandomCache(AbstractCache):
     """
     Generic cache class.
-    
+
     Utilizes the random eviction policy.
     """
 
     __slots__ = '_mapping'
 
     def __init__(self, size: Optional[int] = None, items: Union[Mapping[Hashable, Any], Iterable[Tuple[Hashable, Any]]] = ()) -> None:
-        """Initializes a Cache instance."""
+        """Initializes a RandomCache instance."""
         super().__init__(size)
 
         self._mapping = dict(items)
@@ -154,12 +167,6 @@ class Cache(AbstractCache):
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}({self._size!r}, {dict(iter(self))!r})'
-
-    def trim(self) -> None:
-        if self._size is not None:
-            while len(self._mapping) > self._size:
-                del self._mapping[next(iter(self._mapping))]
-                self._evictions += 1
 
     def get_entry(self, key: Hashable, default: Any = None) -> Any:
         try:
@@ -180,8 +187,11 @@ class Cache(AbstractCache):
         try: del self._mapping[key]
         except KeyError: pass
 
+    def _get_evictees(self, n: int) -> Iterable[Hashable]:
+        return sample(list(self._mapping), n)
 
-class LruCache(Cache):
+
+class LruCache(RandomCache):
     """
     Generic cache class.
 
@@ -194,12 +204,6 @@ class LruCache(Cache):
 
         self._mapping = OrderedDict(items)
         self.trim()
-
-    def trim(self) -> None:
-        if self._size is not None:
-            while len(self._mapping) > self._size:
-                self.del_entry(next(self.least_recent(1))[0])
-                self._evictions += 1
 
     def get_entry(self, key: Hashable, default: Any = None) -> Any:
         value = super().get_entry(key, default)
@@ -227,34 +231,37 @@ class LruCache(Cache):
 
         return it
 
+    def _get_evictees(self, n: int) -> Iterable[Hashable]:
+        return (k for (k, _) in self.least_recent(n))
 
-class LfuCache(Cache):
+
+class LfuCache(RandomCache):
     """
     Generic cache class.
 
     Utilizes the least-frequently-used eviction policy.
     """
 
-    __Slots__ = '_counts'
+    __slots__ = '_counts'
 
     def __init__(self, size: Optional[int] = None, items: Union[Mapping[Hashable, Any], Iterable[Tuple[Hashable, Any]]] = ()) -> None:
         """Initializes a LfuCache instance."""
+        if isinstance(items, Mapping):
+            self._counts = dict.fromkeys(items, 0)
+        elif hasattr(items, 'keys'):
+            self._counts = dict.fromkeys(items.keys(), 0)
+        else:
+            for (key, _) in items:
+                self._counts[key] = 0
+
         super().__init__(size, items)
-
-        self._counts = dict.fromkeys(self._mapping.keys(), 0)
-
-    def trim(self) -> None:
-        if self._size is not None:
-            while len(self._mapping) > self._size:
-                self.del_entry(next(self.least_frequent(1))[0])
-                self._evictions += 1
 
     def get_entry(self, key: Hashable, default: Any = None) -> Any:
         try:
             value = self._mapping[key]
+            self._counts[key] += 1
             self._lookups += 1
             self._hits += 1
-            self._counts[key] += 1
             return value
 
         except KeyError:
@@ -290,6 +297,9 @@ class LfuCache(Cache):
             it = islice(it, clamp(0, n, len(self._mapping)))
 
         return it
+
+    def _get_evictees(self, n: int) -> Iterable[Hashable]:
+        return (k for (k, _) in self.least_frequent(n))
 
 
 def clamp(low: int, val: int, high: int) -> int:

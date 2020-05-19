@@ -2,7 +2,9 @@ import argparse as ap
 import asyncio as aio
 import logging
 
-from libs import CachedResolver, AutoResolver, TcpServer, TlsTunnel, UdpServer
+from dns_cache.resolver import AutoResolver, CachedResolver
+from dns_cache.server import TcpServer, UdpServer
+from dns_cache.tunnel import TlsTunnel
 
 logging.basicConfig(format='[%(asctime)-15s] %(message)s', level=logging.INFO)
 

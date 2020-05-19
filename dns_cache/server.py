@@ -1,7 +1,7 @@
 from asyncio import TimerHandle, Transport
 from typing import Optional, Tuple
 
-from . import protocols
+from . import protocol
 from .packet import Packet
 from .resolver import AbstractResolver
 
@@ -34,7 +34,7 @@ async def aresolve_query(resolver: AbstractResolver, query: bytes) -> bytes:
     return packet.encode()
 
 
-class TcpServer(protocols.AbstractStreamProtocol):
+class TcpServer(protocol.AbstractStreamProtocol):
     """TCP DNS stub server class."""
 
     __slots__ = \
@@ -102,7 +102,7 @@ class TcpServer(protocols.AbstractStreamProtocol):
         self._requests.add(request)
 
 
-class UdpServer(protocols.AbstractDatagramProtocol):
+class UdpServer(protocol.AbstractDatagramProtocol):
     """UDP DNS stub server class."""
 
     __slots__ = '_resolver'

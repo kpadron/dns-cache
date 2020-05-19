@@ -262,8 +262,11 @@ class AutoResolver(CachedResolver):
         try:
             while True:
                 await aio.sleep(MIN_SLEEP_TIME)
+                logger.info(f'<AutoResolver {id(self):x}> Refresher woke up')
 
                 questions = [question for (question, answer) in self._cache.most_recent(10000) if answer.timeleft <= MIN_SLEEP_TIME]
+                logger.info(f'<AutoResolver {id(self):x}> Refresher found {len(questions)} expiring entries')
+
                 resolutions = (StubResolver._aresolve_question(self, question) for question in questions)
                 answers = await aio.gather(*resolutions)
 
@@ -271,7 +274,7 @@ class AutoResolver(CachedResolver):
                     if self._is_cacheable(answer):
                         self._cache.set_entry(question, answer)
 
-                logger.info(f'<AutoResolver {id(self):x}> Refresher woke up - cache.stats={self._cache.stats!r}')
+                logger.info(f'<AutoResolver {id(self):x}> Refresher sleeping')
 
         except Exception as exc:
             print(exc)
